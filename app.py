@@ -66,6 +66,7 @@ def send_password_reset_email(email: str, token: str):
         msg = Message(
             subject='MAUDE Data Processor - Password Reset',
             recipients=[email],
+            sender=MAIL_DEFAULT_SENDER,
             html=f"""
             <html>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
