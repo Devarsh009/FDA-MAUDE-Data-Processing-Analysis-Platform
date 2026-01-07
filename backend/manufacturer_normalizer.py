@@ -39,8 +39,21 @@ class ManufacturerNormalizer:
     def __init__(self, groq_client: Optional[GroqClient] = None):
         self.groq_client = groq_client or GroqClient()
         # Use /tmp on Vercel (serverless) or cache/ for local
-        self.cache_dir = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', 'cache')), 'maude_cache')
-        os.makedirs(self.cache_dir, exist_ok=True)
+        if os.path.exists('/tmp'):
+            self.cache_dir = os.path.join('/tmp', 'maude_cache')
+        elif os.getenv('TMPDIR'):
+            self.cache_dir = os.path.join(os.getenv('TMPDIR'), 'maude_cache')
+        elif os.getenv('TMP'):
+            self.cache_dir = os.path.join(os.getenv('TMP'), 'maude_cache')
+        else:
+            self.cache_dir = os.path.join('cache', 'maude_cache')
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+        except OSError:
+            # Fallback to /tmp if available
+            if self.cache_dir != os.path.join('/tmp', 'maude_cache') and os.path.exists('/tmp'):
+                self.cache_dir = os.path.join('/tmp', 'maude_cache')
+                os.makedirs(self.cache_dir, exist_ok=True)
         
         # Cache files
         self.canonical_map_file = os.path.join(self.cache_dir, "manufacturer_canonical_map.json")

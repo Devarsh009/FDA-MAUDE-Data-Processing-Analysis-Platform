@@ -52,15 +52,14 @@ IMDRF_STRUCTURE = {
 # Flask Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "maude-secret-key-change-in-production-2024")
 
-# Email Configuration for Password Recovery (Mailgun)
-# Mailgun is used for sending password reset emails
-MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.mailgun.org")
+# Email Configuration for Password Recovery
+MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
 MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
 MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "True").lower() == "true"
 MAIL_USE_SSL = os.getenv("MAIL_USE_SSL", "False").lower() == "true"
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")  # Format: postmaster@your-domain.mailgun.org
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")  # SMTP password from Mailgun dashboard
-MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "")  # Format: noreply@your-domain.com
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
+MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", MAIL_USERNAME)
 
 # Password Reset Token Expiry (in seconds)
 PASSWORD_RESET_EXPIRY = 3600  # 1 hour

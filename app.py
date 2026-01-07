@@ -19,7 +19,14 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # Use /tmp for Vercel (serverless) or temp directory for local
-app.config['UPLOAD_FOLDER'] = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', tempfile.gettempdir())), 'maude_uploads')
+if os.path.exists('/tmp'):
+    app.config['UPLOAD_FOLDER'] = os.path.join('/tmp', 'maude_uploads')
+elif os.getenv('TMPDIR'):
+    app.config['UPLOAD_FOLDER'] = os.path.join(os.getenv('TMPDIR'), 'maude_uploads')
+elif os.getenv('TMP'):
+    app.config['UPLOAD_FOLDER'] = os.path.join(os.getenv('TMP'), 'maude_uploads')
+else:
+    app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'maude_uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Flask-Mail configuration
@@ -66,7 +73,6 @@ def send_password_reset_email(email: str, token: str):
         msg = Message(
             subject='MAUDE Data Processor - Password Reset',
             recipients=[email],
-            sender=MAIL_DEFAULT_SENDER,
             html=f"""
             <html>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">

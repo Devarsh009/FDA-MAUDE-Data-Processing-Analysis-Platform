@@ -13,12 +13,31 @@ from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 
 # User data storage (JSON file for simplicity)
 # Use /tmp on Vercel (serverless) or data/ for local
-DATA_DIR = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', 'data')), 'maude_data')
+# Check for Vercel environment or use /tmp if available, otherwise use data/
+if os.path.exists('/tmp'):
+    DATA_DIR = os.path.join('/tmp', 'maude_data')
+elif os.getenv('TMPDIR'):
+    DATA_DIR = os.path.join(os.getenv('TMPDIR'), 'maude_data')
+elif os.getenv('TMP'):
+    DATA_DIR = os.path.join(os.getenv('TMP'), 'maude_data')
+else:
+    DATA_DIR = os.path.join('data', 'maude_data')
+
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 RESET_TOKENS_FILE = os.path.join(DATA_DIR, "reset_tokens.json")
 
 # Ensure data directory exists
-os.makedirs(DATA_DIR, exist_ok=True)
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except OSError as e:
+    # If we can't create the directory, try /tmp as fallback
+    if DATA_DIR != os.path.join('/tmp', 'maude_data'):
+        DATA_DIR = os.path.join('/tmp', 'maude_data')
+        USERS_FILE = os.path.join(DATA_DIR, "users.json")
+        RESET_TOKENS_FILE = os.path.join(DATA_DIR, "reset_tokens.json")
+        os.makedirs(DATA_DIR, exist_ok=True)
+    else:
+        raise
 
 
 class User(UserMixin):
