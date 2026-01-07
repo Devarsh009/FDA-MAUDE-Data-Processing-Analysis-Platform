@@ -13,7 +13,11 @@ class IMDRFMapper:
     """Maps Device Problem to IMDRF codes using deterministic matching with Groq fallback."""
     
     def __init__(self, groq_client: Optional[GroqClient] = None):
-        self.groq_client = groq_client or GroqClient()
+        try:
+            self.groq_client = groq_client if groq_client is not None else GroqClient()
+        except Exception as e:
+            print(f"Warning: Could not initialize GroqClient: {e}. IMDRF mapping will use deterministic methods only.")
+            self.groq_client = None
         self.level1_map = {}
         self.level2_map = {}
         self.level3_map = {}
@@ -193,6 +197,8 @@ class IMDRFMapper:
     
     def _groq_fallback_level1(self, device_problem_part: str) -> Optional[str]:
         """Groq fallback for Level-1 selection (Annex-controlled)."""
+        if not self.groq_client or not self.groq_client.available:
+            return None
         terms_str = ', '.join([f'"{t}"' for t in self.level1_terms[:100]])  # Limit to avoid token limits
         
         prompt = f"""You are selecting the most appropriate Level-1 IMDRF term for a device problem.
@@ -242,6 +248,8 @@ Return format (JSON only):
     
     def _groq_fallback_level2(self, device_problem_part: str, level1_term: str) -> Optional[str]:
         """Groq fallback for Level-2 selection (Annex-controlled)."""
+        if not self.groq_client or not self.groq_client.available:
+            return None
         level2_terms = self.level2_hierarchy.get(level1_term, [])
         if not level2_terms:
             return None

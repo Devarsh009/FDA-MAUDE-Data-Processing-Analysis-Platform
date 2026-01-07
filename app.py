@@ -243,8 +243,9 @@ def process_file():
     if not allowed_file(file.filename):
         return jsonify({'error': 'Invalid file type. Please upload CSV or Excel file.'}), 400
     
-    if not GROQ_API_KEY:
-        return jsonify({'error': 'GROQ_API_KEY not configured. Please set environment variable.'}), 500
+    # Note: GROQ_API_KEY is optional - app works without it using deterministic methods only
+    # if not GROQ_API_KEY:
+    #     return jsonify({'error': 'GROQ_API_KEY not configured. Please set environment variable.'}), 500
     
     try:
         # Save uploaded file

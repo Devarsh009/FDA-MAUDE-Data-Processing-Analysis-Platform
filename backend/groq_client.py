@@ -15,9 +15,20 @@ class GroqClient:
     
     def __init__(self):
         if not GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-        self.client = Groq(api_key=GROQ_API_KEY)
-        self.model = GROQ_MODEL
+            # Graceful degradation: allow initialization without API key
+            self.client = None
+            self.model = GROQ_MODEL
+            self.available = False
+            print("Warning: GROQ_API_KEY not set. AI-assisted features will be disabled.")
+        else:
+            try:
+                self.client = Groq(api_key=GROQ_API_KEY)
+                self.model = GROQ_MODEL
+                self.available = True
+            except Exception as e:
+                print(f"Warning: Failed to initialize Groq client: {e}. AI-assisted features will be disabled.")
+                self.client = None
+                self.available = False
     
     def resolve_manufacturer_merger(self, manufacturer_name: str) -> str:
         """
@@ -31,6 +42,8 @@ class GroqClient:
         Returns:
             Resolved manufacturer name or original if uncertain
         """
+        if not self.available or not self.client:
+            return manufacturer_name
         if not manufacturer_name or not manufacturer_name.strip():
             return manufacturer_name
         
@@ -86,6 +99,8 @@ Return format: Just the company name, or the input name if uncertain."""
         Returns:
             Comma-separated keywords in double quotes, or blank if nothing meaningful
         """
+        if not self.available or not self.client:
+            return ""
         if not event_text or not event_text.strip():
             return ""
         
@@ -150,6 +165,8 @@ Extract keywords now:"""
         Returns:
             IMDRF code from deepest confident level, or blank if no match
         """
+        if not self.available or not self.client:
+            return ""
         if not device_problem or not device_problem.strip():
             return ""
         

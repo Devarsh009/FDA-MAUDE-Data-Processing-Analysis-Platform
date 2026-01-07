@@ -938,7 +938,13 @@
                 
                 updateProgress(70);
                 
-                if (response.ok) {
+                // Check Content-Type to ensure we got an Excel file, not HTML (login redirect)
+                const contentType = response.headers.get('Content-Type') || '';
+                const isExcelFile = contentType.includes('spreadsheet') || 
+                                   contentType.includes('excel') || 
+                                   contentType.includes('openxmlformats');
+                
+                if (response.ok && isExcelFile) {
                     updateProgress(90);
                     
                     // Get filename from Content-Disposition header
@@ -974,9 +980,33 @@
                         updateProgress(0);
                         progressBar.classList.remove('show');
                     }, 2000);
+                } else if (response.ok && !isExcelFile) {
+                    // Got HTML instead of Excel (likely login redirect)
+                    const text = await response.text();
+                    if (text.includes('login') || text.includes('Login')) {
+                        showStatus('Session expired. Please log in again.', 'error');
+                        setTimeout(() => {
+                            window.location.href = '/login';
+                        }, 2000);
+                    } else {
+                        // Try to parse as JSON error
+                        try {
+                            const error = JSON.parse(text);
+                            showStatus(`Error: ${error.error || 'Processing failed'}`, 'error');
+                        } catch {
+                            showStatus('Error: Received unexpected response. Please try again.', 'error');
+                        }
+                    }
+                    updateProgress(0);
+                    progressBar.classList.remove('show');
                 } else {
-                    const error = await response.json();
-                    showStatus(`Error: ${error.error || 'Processing failed'}`, 'error');
+                    // Error response - try to parse JSON
+                    try {
+                        const error = await response.json();
+                        showStatus(`Error: ${error.error || 'Processing failed'}`, 'error');
+                    } catch {
+                        showStatus(`Error: Processing failed (Status: ${response.status})`, 'error');
+                    }
                     updateProgress(0);
                     progressBar.classList.remove('show');
                 }

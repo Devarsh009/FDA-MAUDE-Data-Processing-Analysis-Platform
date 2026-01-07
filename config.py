@@ -3,6 +3,13 @@ Configuration file for MAUDE processing pipeline.
 """
 import os
 
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, use environment variables only
+
 # Groq API Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.1-70b-versatile"  # Using Groq's fast model

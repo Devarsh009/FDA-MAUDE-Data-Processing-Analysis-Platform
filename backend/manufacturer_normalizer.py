@@ -37,7 +37,11 @@ class ManufacturerNormalizer:
     ]
     
     def __init__(self, groq_client: Optional[GroqClient] = None):
-        self.groq_client = groq_client or GroqClient()
+        try:
+            self.groq_client = groq_client if groq_client is not None else GroqClient()
+        except Exception as e:
+            print(f"Warning: Could not initialize GroqClient: {e}. Manufacturer normalization will use deterministic methods only.")
+            self.groq_client = None
         # Use /tmp on Vercel (serverless) or cache/ for local
         if os.path.exists('/tmp'):
             self.cache_dir = os.path.join('/tmp', 'maude_cache')
@@ -161,6 +165,8 @@ class ManufacturerNormalizer:
           "search_queries": ["<query1>", "<query2>"]
         }
         """
+        if not self.groq_client or not self.groq_client.available:
+            return {"action": "NO_CHANGE", "canonical": "", "relation": "unknown", "search_queries": []}
         prompt = f"""You are a medical device industry expert. Given a manufacturer name, determine if it has been acquired, merged, renamed, or is a subsidiary of another company.
 
 Manufacturer name: {cleaned_name}

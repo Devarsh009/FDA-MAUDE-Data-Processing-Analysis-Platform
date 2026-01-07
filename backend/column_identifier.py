@@ -13,7 +13,11 @@ class ColumnIdentifier:
     """Identifies MAUDE columns using deterministic heuristics and Groq fallback."""
     
     def __init__(self, groq_client: Optional[GroqClient] = None):
-        self.groq_client = groq_client or GroqClient()
+        try:
+            self.groq_client = groq_client if groq_client is not None else GroqClient()
+        except Exception as e:
+            print(f"Warning: Could not initialize GroqClient: {e}. Column identification will use deterministic methods only.")
+            self.groq_client = None
         # Use /tmp on Vercel (serverless) or cache/ for local
         if os.path.exists('/tmp'):
             self.cache_dir = os.path.join('/tmp', 'maude_cache')
@@ -96,6 +100,15 @@ class ColumnIdentifier:
     
     def _groq_identify(self, headers: List[str]) -> Dict[str, Optional[str]]:
         """Use Groq to identify columns semantically."""
+        if not self.groq_client or not self.groq_client.available:
+            return {
+                "event_date": None,
+                "date_received": None,
+                "manufacturer": None,
+                "device_problem": None,
+                "event_text": None
+            }
+        
         headers_str = ', '.join([f'"{h}"' for h in headers])
         
         prompt = f"""You are identifying columns in a MAUDE (FDA medical device adverse event) data file.
@@ -178,9 +191,9 @@ Return format (JSON only, no explanations):
         # Step 1: Deterministic identification
         result = self._deterministic_identify(headers)
         
-        # Step 2: Groq fallback for missing columns
+        # Step 2: Groq fallback for missing columns (only if Groq is available)
         missing = [k for k, v in result.items() if v is None]
-        if missing:
+        if missing and self.groq_client and self.groq_client.available:
             print(f"Using Groq to identify missing columns: {missing}")
             groq_result = self._groq_identify(headers)
             
@@ -188,6 +201,8 @@ Return format (JSON only, no explanations):
             for key in missing:
                 if groq_result.get(key):
                     result[key] = groq_result[key]
+        elif missing:
+            print(f"Warning: Missing columns {missing} could not be identified (Groq unavailable). Using deterministic results only.")
         
         # HARD STOP: device_problem is required
         if not result["device_problem"]:
