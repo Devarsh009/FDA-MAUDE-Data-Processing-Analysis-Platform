@@ -150,7 +150,7 @@ maude-data-processor/
 
 ## 👤 Author
 
-Developed as part of an internship project.
+Devarsh Radadia
 
 ## 🙏 Acknowledgments
 
