@@ -18,7 +18,9 @@ from config import (
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
-app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
+# Use /tmp for Vercel (serverless) or temp directory for local
+app.config['UPLOAD_FOLDER'] = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', tempfile.gettempdir())), 'maude_uploads')
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Flask-Mail configuration
 app.config['MAIL_SERVER'] = MAIL_SERVER

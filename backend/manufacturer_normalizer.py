@@ -38,7 +38,8 @@ class ManufacturerNormalizer:
     
     def __init__(self, groq_client: Optional[GroqClient] = None):
         self.groq_client = groq_client or GroqClient()
-        self.cache_dir = "cache"
+        # Use /tmp on Vercel (serverless) or cache/ for local
+        self.cache_dir = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', 'cache')), 'maude_cache')
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # Cache files

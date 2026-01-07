@@ -12,11 +12,13 @@ from flask_login import UserMixin
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 
 # User data storage (JSON file for simplicity)
-USERS_FILE = os.path.join("data", "users.json")
-RESET_TOKENS_FILE = os.path.join("data", "reset_tokens.json")
+# Use /tmp on Vercel (serverless) or data/ for local
+DATA_DIR = os.path.join(os.getenv('TMPDIR', os.getenv('TMP', 'data')), 'maude_data')
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+RESET_TOKENS_FILE = os.path.join(DATA_DIR, "reset_tokens.json")
 
 # Ensure data directory exists
-os.makedirs("data", exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 
 class User(UserMixin):
