@@ -541,12 +541,18 @@ class MAUDEProcessor:
         # Apply mapping (deterministic + Groq fallback)
         print(f"Applying IMDRF mapping to {len(df)} rows...")
         df['IMDRF Code'] = df[device_problem_col].apply(
-            lambda v: self.imdrf_mapper.map_device_problem(v)
+            lambda v: self.imdrf_mapper.map_device_problem_cell_to_codes(v)
         )
         
-        # Validate all nonblank codes exist in Annex
-        nonblank_codes = df[df['IMDRF Code'].notna() & (df['IMDRF Code'].astype(str).str.strip() != '')]['IMDRF Code'].unique()
-        invalid_codes = [code for code in nonblank_codes if not self.imdrf_mapper.validate_code(str(code).strip())]
+        # Validate all nonblank codes exist in Annex (handle multiple codes separated by ' | ')
+        nonblank_cells = df[df['IMDRF Code'].notna() & (df['IMDRF Code'].astype(str).str.strip() != '')]['IMDRF Code'].unique()
+        all_codes = set()
+        for cell_value in nonblank_cells:
+            cell_str = str(cell_value).strip()
+            # Split on ' | ' to get individual codes
+            codes = [c.strip() for c in cell_str.split(' | ') if c.strip()]
+            all_codes.update(codes)
+        invalid_codes = [code for code in all_codes if not self.imdrf_mapper.validate_code(code)]
         if invalid_codes:
             raise RuntimeError(f"HARD STOP: Found IMDRF codes not in Annex: {invalid_codes[:5]}")
         
@@ -658,15 +664,20 @@ class MAUDEProcessor:
         results['details']['imdrf_position'] = imdrf_position
         results['details']['device_problem_position'] = device_problem_position
         
-        # Check 5: All nonblank IMDRF codes exist in Annex (HARD STOP)
+        # Check 5: All nonblank IMDRF codes exist in Annex (HARD STOP) - handle multiple codes separated by ' | '
         imdrf_codes_valid = True
         if 'IMDRF Code' in df.columns:
-            nonblank_codes = df[df['IMDRF Code'].notna() & (df['IMDRF Code'].astype(str).str.strip() != '')]['IMDRF Code'].unique()
+            nonblank_cells = df[df['IMDRF Code'].notna() & (df['IMDRF Code'].astype(str).str.strip() != '')]['IMDRF Code'].unique()
+            all_codes = set()
+            for cell_value in nonblank_cells:
+                cell_str = str(cell_value).strip()
+                # Split on ' | ' to get individual codes
+                codes = [c.strip() for c in cell_str.split(' | ') if c.strip()]
+                all_codes.update(codes)
             invalid_codes = []
-            for code in nonblank_codes:
-                code_str = str(code).strip()
-                if not self.imdrf_mapper.validate_code(code_str):
-                    invalid_codes.append(code_str)
+            for code in all_codes:
+                if not self.imdrf_mapper.validate_code(code):
+                    invalid_codes.append(code)
             if invalid_codes:
                 imdrf_codes_valid = False
                 results['details']['invalid_imdrf_codes'] = invalid_codes[:10]

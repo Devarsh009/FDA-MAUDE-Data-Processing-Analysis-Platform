@@ -160,6 +160,26 @@ class IMDRFMapper:
         
         print(f"Loaded Annex: L1={len(level1_map)}, L2={len(level2_map)}, L3={len(level3_map)}, Total codes={len(annex_codes)}")
     
+    def _map_one_problem_to_code(self, problem_part: str) -> str:
+        """
+        Map a single Device Problem part to one IMDRF code.
+        Deterministic: exact match only after normalization.
+        Preference: level3 > level2 > level1.
+        """
+        pn = self._norm_term(problem_part)
+        if not pn:
+            return ""
+        if pn == self._norm_term("Appropriate Term/Code Not Available"):
+            return ""
+
+        if pn in self.level3_map:
+            return self.level3_map[pn]
+        if pn in self.level2_map:
+            return self.level2_map[pn]
+        if pn in self.level1_map:
+            return self.level1_map[pn]
+        return ""
+
     def _deterministic_map(self, device_problem_part: str) -> str:
         """Deterministic mapping for a single part."""
         if self._is_blank(device_problem_part):
@@ -393,6 +413,39 @@ Return format (JSON only):
         
         return l2_code  # Return Level-2 code
     
+    def map_device_problem_cell_to_codes(self, device_problem_value: str) -> str:
+        """
+        Handles multi-problem cells:
+          - split on ';'
+          - map each part independently
+          - output codes joined by ' | ' in original order
+          - de-duplicate codes while preserving order
+          - skip unmapped parts
+        """
+        if device_problem_value is None:
+            return ""
+        raw = str(device_problem_value).strip()
+        if not raw or raw.lower() == "nan":
+            return ""
+
+        # Split multiple problems
+        parts = [p.strip() for p in raw.split(";") if p.strip()]
+        if not parts:
+            return ""
+
+        codes_in_order = []
+        seen = set()
+
+        for part in parts:
+            code = self._map_one_problem_to_code(part)
+            if not code:
+                continue  # fail-safe: skip unmapped part
+            if code not in seen:
+                seen.add(code)
+                codes_in_order.append(code)
+
+        return " | ".join(codes_in_order) if codes_in_order else ""
+
     def map_device_problem(self, device_problem_value: str) -> str:
         """
         Map Device Problem to IMDRF code.
