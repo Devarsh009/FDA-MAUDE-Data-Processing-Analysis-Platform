@@ -67,6 +67,26 @@ class AuthManager:
         self.serializer = URLSafeTimedSerializer(secret_key)
         self._ensure_users_file()
         self._ensure_tokens_file()
+
+        # Optionally create a test user for local development / testing
+        try:
+            from config import TEST_ACCOUNTS_ENABLED, TEST_USER_EMAIL, TEST_USER_PASSWORD
+            if TEST_ACCOUNTS_ENABLED:
+                users = self._load_users()
+                test_email = TEST_USER_EMAIL.lower()
+                if test_email not in users:
+                    # Create a deterministic test user (password hashed)
+                    password_hash = User.hash_password(TEST_USER_PASSWORD)
+                    users[test_email] = {
+                        "email": TEST_USER_EMAIL,
+                        "password_hash": password_hash,
+                        "name": "Test User",
+                        "created_at": datetime.now().isoformat()
+                    }
+                    self._save_users(users)
+        except Exception:
+            # Don't let failure to seed a test user break the auth manager
+            pass
     
     def _ensure_users_file(self):
         """Ensure users.json exists."""

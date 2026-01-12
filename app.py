@@ -112,7 +112,19 @@ def login():
     """Render login page."""
     if current_user.is_authenticated:
         return redirect(url_for('index'))
-    return render_template('login.html')
+    # Expose test accounts to the login template when enabled
+    try:
+        from config import TEST_ACCOUNTS_ENABLED, TEST_USER_EMAIL, TEST_USER_PASSWORD
+        test_accounts = []
+        if TEST_ACCOUNTS_ENABLED:
+            test_accounts = [{
+                'email': TEST_USER_EMAIL,
+                'password': TEST_USER_PASSWORD,
+                'label': 'Test Account'
+            }]
+    except Exception:
+        test_accounts = []
+    return render_template('login.html', test_accounts=test_accounts)
 
 
 @app.route('/register')

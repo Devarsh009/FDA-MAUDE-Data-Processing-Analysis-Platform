@@ -70,3 +70,9 @@ MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", MAIL_USERNAME)
 
 # Password Reset Token Expiry (in seconds)
 PASSWORD_RESET_EXPIRY = 3600  # 1 hour
+
+# Test accounts for development/testing
+# Set TEST_ACCOUNTS_ENABLED to 'False' in production to hide and avoid auto-creation
+TEST_ACCOUNTS_ENABLED = os.getenv("TEST_ACCOUNTS_ENABLED", "True").lower() == "true"
+TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL", "test@maude.local")
+TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "Test12345")

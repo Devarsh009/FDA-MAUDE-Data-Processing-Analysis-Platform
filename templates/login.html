@@ -458,12 +458,31 @@
                     <span id="btnText">Sign In</span>
                 </button>
             </form>
-            
+
+            <!-- Test accounts (rendered only if provided by the server) -->
+            {% if test_accounts %}
             <div class="divider">or</div>
-            
+            <div class="test-accounts" style="margin-top:16px;">
+                <h3 style="text-align:center; color:var(--text-secondary); font-size:0.9rem; margin-bottom:8px;">Test Accounts</h3>
+                {% for acc in test_accounts %}
+                <div class="test-account" style="display:flex; gap:8px; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-size:0.9rem; color:var(--text-primary);">
+                        <strong>{{ acc.email }}</strong>
+                        <span style="color:var(--text-secondary);"> / </span>
+                        <em style="color:var(--text-secondary);">{{ acc.password }}</em>
+                    </div>
+                    <div>
+                        <button class="submit-btn" style="padding:8px 12px; font-size:0.9rem;" type="button" data-email="{{ acc.email }}" data-password="{{ acc.password }}" aria-label="Login as {{ acc.email }}">Login</button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="divider">or</div>
             <div class="register-link">
                 Don't have an account? <a href="/register">Sign up</a>
             </div>
+            {% endif %}
         </div>
     </div>
     
@@ -528,6 +547,47 @@
                 submitBtn.disabled = false;
                 btnText.textContent = 'Sign In';
             }
+        });
+
+        // Auto-login handler for Test Accounts buttons
+        document.querySelectorAll('.test-account button[type="button"]').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const email = btn.dataset.email;
+                const password = btn.dataset.password;
+
+                if (!email || !password) {
+                    showAlert('Test account not configured correctly.', 'error');
+                    return;
+                }
+
+                // Disable all login controls
+                btn.disabled = true;
+                submitBtn.disabled = true;
+                btnText.textContent = 'Signing in...';
+
+                try {
+                    const response = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password })
+                    });
+
+                    const data = await response.json();
+                    if (response.ok) {
+                        showAlert('Login successful! Redirecting...', 'success');
+                    } else {
+                        showAlert(data.error || 'Auto-login failed', 'error');
+                        btn.disabled = false;
+                        submitBtn.disabled = false;
+                        btnText.textContent = 'Sign In';
+                    }
+                } catch (err) {
+                    showAlert('Network error during auto-login. Please try again.', 'error');
+                    btn.disabled = false;
+                    submitBtn.disabled = false;
+                    btnText.textContent = 'Sign In';
+                }
+            });
         });
     </script>
 </body>
