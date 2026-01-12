@@ -59,6 +59,28 @@ The application processes MAUDE data through the following stages:
 - API endpoints for programmatic access
 - Real-time processing status updates
 
+## 📊 Streamlit Signal Dashboard (new)
+
+A simple Streamlit dashboard has been added to visualize event counts over time with threshold detection.
+
+How to run locally:
+
+1. Install the new dependencies (or the full set):
+
+   pip install -r requirements.txt
+
+2. Run the Streamlit app:
+
+   streamlit run streamlit_app.py
+
+Notes:
+
+- The Streamlit app expects a *cleaned* MAUDE file (Excel or CSV) with the following columns present (exact headers): `Event Type`, `Manufacturer`, `Device Problem`, `IMDRF Code`, and either `Event Date` or `Date Received` (dates must be in `DD-MM-YYYY` format).
+- The Streamlit app is independent of the Flask app and intentionally does NOT call any LLMs.
+- If you prefer a different filename for the dashboard, rename `streamlit_app.py` and run with `streamlit run <filename>`.
+
+
+
 ## 📝 License
 
 [Add your license here]
