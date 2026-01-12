@@ -10,4 +10,5 @@ werkzeug>=3.0.1
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 bcrypt>=4.1.2
-itsdangerous>=2.1.2python-dotenv>=1.0.0
+itsdangerous>=2.1.2
+python-dotenv>=1.0.0
