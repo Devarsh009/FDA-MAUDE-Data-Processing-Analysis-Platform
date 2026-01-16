@@ -16,6 +16,7 @@ from backend.imdrf_insights import (
     analyze_imdrf_insights,
     get_top_manufacturers_for_prefix
 )
+from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
 from config import (
     GROQ_API_KEY, SECRET_KEY, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS,
     MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
@@ -23,7 +24,7 @@ from config import (
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size for large TXT files
 # Use /tmp for Vercel (serverless) or temp directory for local
 if os.path.exists('/tmp'):
     app.config['UPLOAD_FOLDER'] = os.path.join('/tmp', 'maude_uploads')
@@ -484,6 +485,113 @@ def api_analyze_insights():
         }
 
         return jsonify(response_data), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+# TXT to CSV Converter Routes
+@app.route('/txt-to-csv')
+@login_required
+def txt_to_csv_page():
+    """Render TXT to CSV converter page."""
+    return render_template('txt_to_csv.html', user=current_user)
+
+
+@app.route('/api/txt-to-csv/preview', methods=['POST'])
+@login_required
+def api_txt_preview():
+    """Upload TXT file and get preview."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    if not file.filename.lower().endswith('.txt'):
+        return jsonify({'error': 'Invalid file type. Please upload a .txt file.'}), 400
+
+    try:
+        # Save uploaded file with unique name
+        filename = secure_filename(file.filename)
+        file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+        file.save(input_path)
+
+        # Get preview
+        preview = get_txt_preview(input_path, num_rows=10)
+
+        # Store file path in session
+        session[f'txt_file_{file_id}'] = input_path
+
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'preview': preview
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/txt-to-csv/convert', methods=['POST'])
+@login_required
+def api_txt_convert():
+    """Convert TXT file to CSV."""
+    data = request.get_json()
+    file_id = data.get('file_id')
+
+    if not file_id:
+        return jsonify({'error': 'Missing file_id parameter'}), 400
+
+    try:
+        # Retrieve file path from session
+        file_path = session.get(f'txt_file_{file_id}')
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        # Generate output path
+        output_file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        output_filename = os.path.splitext(os.path.basename(file_path))[0] + '.csv'
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{output_file_id}_{output_filename}")
+
+        # Convert file
+        converter = TxtToCsvConverter()
+        stats = converter.process_file_chunked(file_path, output_path)
+
+        # Store output path in session
+        session[f'csv_file_{output_file_id}'] = {
+            'path': output_path,
+            'filename': output_filename
+        }
+
+        return jsonify({
+            'success': True,
+            'output_file_id': output_file_id,
+            'stats': stats
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/txt-to-csv/download/<file_id>')
+@login_required
+def api_txt_download(file_id):
+    """Download converted CSV file."""
+    try:
+        # Retrieve file info from session
+        file_info = session.get(f'csv_file_{file_id}')
+        if not file_info or not os.path.exists(file_info['path']):
+            return jsonify({'error': 'File not found. Please convert again.'}), 404
+
+        return send_file(
+            file_info['path'],
+            as_attachment=True,
+            download_name=file_info['filename'],
+            mimetype='text/csv'
+        )
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400
