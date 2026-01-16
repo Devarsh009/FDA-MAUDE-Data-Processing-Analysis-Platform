@@ -1,0 +1,39 @@
+# Ignore unnecessary files for Vercel deployment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Ignore Streamlit files (not needed for Flask deployment)
+streamlit_app.py
+pages/
+
+# Ignore test files
+tests/
+test_*.py
+
+# Ignore cache and data files
+cache/
+data/
+*.tmp
+*.temp
+tmpclaude-*
+
+# Ignore local environment files
+.env.local
+
+# Ignore documentation
+*.md
+!README.md
+
+# Ignore git files
+.git/
+.gitignore
