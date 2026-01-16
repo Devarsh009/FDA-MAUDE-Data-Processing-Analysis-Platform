@@ -1,5 +1,5 @@
-# Production dependencies for Vercel (optimized for size)
-# For local development with all features, use: pip install -r requirements-dev.txt
+# Vercel deployment - Absolute minimum to stay under 250MB
+# WARNING: This may not support all features. For full functionality, run locally.
 
 flask==3.0.0
 flask-login==0.6.3
@@ -9,13 +9,13 @@ bcrypt==4.1.2
 itsdangerous==2.1.2
 python-dotenv==1.0.0
 
-# Data processing - using older, smaller versions
-pandas==2.0.3
-numpy==1.24.3
-openpyxl==3.1.2
+# Absolute minimum data processing stack
+# Using oldest stable versions to minimize size
+pandas==1.3.5
+numpy==1.21.6
+openpyxl==3.0.9
 
-# Optional for Groq AI (comment out if not needed)
-# groq==0.4.1
+# These are small and required
+python-dateutil==2.8.2
 
-# Note: Streamlit and plotly excluded from Vercel deployment
-# IMDRF Insights feature requires local deployment or alternative hosting
+# Estimated total: ~170-190MB (should be under 250MB)
