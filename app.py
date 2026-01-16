@@ -2,7 +2,8 @@
 Flask application for MAUDE data processing web interface with authentication.
 """
 import os
-from flask import Flask, request, render_template, send_file, jsonify, redirect, url_for
+import json
+from flask import Flask, request, render_template, send_file, jsonify, redirect, url_for, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
@@ -10,8 +11,13 @@ import tempfile
 
 from backend.processor import MAUDEProcessor
 from backend.auth import AuthManager, User
+from backend.imdrf_insights import (
+    prepare_data_for_insights,
+    analyze_imdrf_insights,
+    get_top_manufacturers_for_prefix
+)
 from config import (
-    GROQ_API_KEY, SECRET_KEY, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, 
+    GROQ_API_KEY, SECRET_KEY, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS,
     MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
 )
 
@@ -334,6 +340,153 @@ def process_file():
         
     except Exception as e:
         return jsonify({'error': f'Processing failed: {str(e)}'}), 500
+
+
+# IMDRF Insights Routes
+@app.route('/imdrf-insights')
+@login_required
+def imdrf_insights_page():
+    """Render IMDRF Insights page."""
+    return render_template('imdrf_insights.html', user=current_user)
+
+
+@app.route('/api/imdrf-insights/prepare', methods=['POST'])
+@login_required
+def api_prepare_insights():
+    """Prepare uploaded CSV or Excel file for IMDRF insights analysis."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    # Check file extension
+    allowed_extensions = {'.csv', '.xlsx', '.xls'}
+    file_ext = os.path.splitext(file.filename.lower())[1]
+    if file_ext not in allowed_extensions:
+        return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
+
+    try:
+        # Save uploaded file with unique name
+        filename = secure_filename(file.filename)
+        file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+        file.save(input_path)
+
+        # Prepare data for insights
+        result = prepare_data_for_insights(input_path)
+
+        # Store file info in session for later use
+        session[f'insights_file_{file_id}'] = input_path
+
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'all_prefixes': result['all_prefixes'],
+            'all_manufacturers': result['all_manufacturers'],
+            'total_rows': result['total_rows'],
+            'rows_with_imdrf': result['rows_with_imdrf'],
+            'rows_with_dates': result['rows_with_dates']
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/imdrf-insights/top-manufacturers', methods=['GET'])
+@login_required
+def api_top_manufacturers():
+    """Get top manufacturers for a specific IMDRF prefix."""
+    prefix = request.args.get('prefix')
+    file_id = request.args.get('file_id')
+
+    if not prefix or not file_id:
+        return jsonify({'error': 'Missing prefix or file_id parameter'}), 400
+
+    try:
+        # Retrieve file path from session
+        file_path = session.get(f'insights_file_{file_id}')
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        # Prepare data again (in memory)
+        result = prepare_data_for_insights(file_path)
+        df_exploded = result['df_exploded']
+        mfr_col = result['mfr_col']
+
+        # Get top manufacturers
+        top_mfrs = get_top_manufacturers_for_prefix(df_exploded, prefix, mfr_col, top_n=5)
+
+        return jsonify({
+            'success': True,
+            'top_manufacturers': top_mfrs
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/imdrf-insights/analyze', methods=['POST'])
+@login_required
+def api_analyze_insights():
+    """Perform IMDRF insights analysis."""
+    data = request.get_json()
+
+    file_id = data.get('file_id')
+    prefix = data.get('prefix')
+    manufacturers = data.get('manufacturers', [])
+    grain = data.get('grain', 'W')
+    threshold_k = data.get('threshold_k', 2.0)
+
+    if not file_id or not prefix or not manufacturers:
+        return jsonify({'error': 'Missing required parameters'}), 400
+
+    try:
+        # Retrieve file path from session
+        file_path = session.get(f'insights_file_{file_id}')
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        # Prepare data
+        result = prepare_data_for_insights(file_path)
+        df_exploded = result['df_exploded']
+
+        # Perform analysis
+        analysis_result = analyze_imdrf_insights(
+            df_exploded,
+            prefix,
+            manufacturers,
+            grain,
+            threshold_k
+        )
+
+        # Convert pandas data to JSON-serializable format
+        manufacturer_series = {}
+        for mfr, series in analysis_result['manufacturer_series'].items():
+            manufacturer_series[mfr] = {
+                'dates': series.index.strftime('%Y-%m-%d').tolist(),
+                'values': series.tolist()
+            }
+
+        response_data = {
+            'success': True,
+            'universal_mean': analysis_result['universal_mean'],
+            'prefix_mean': analysis_result['prefix_mean'],
+            'prefix_std': analysis_result['prefix_std'],
+            'upper_threshold': analysis_result['upper_threshold'],
+            'lower_threshold': analysis_result['lower_threshold'],
+            'manufacturer_series': manufacturer_series,
+            'date_range': analysis_result['date_range'].strftime('%Y-%m-%d').tolist() if len(analysis_result['date_range']) > 0 else [],
+            'statistics': analysis_result['statistics'],
+            'grain': grain,
+            'selected_prefix': prefix
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
 
 if __name__ == '__main__':

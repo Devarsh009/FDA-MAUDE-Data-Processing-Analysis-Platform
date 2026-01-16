@@ -47,6 +47,7 @@ Thumbs.db
 *.temp
 temp/
 tmp/
+tmpclaude-*
 
 # Uploaded files
 uploads/
