@@ -599,7 +599,7 @@
                 <i class="fas fa-exchange-alt"></i>
                 TXT to CSV Converter
             </h1>
-            <p class="subtitle">Convert large TXT files (up to 1GB+) to CSV format with data validation</p>
+            <p class="subtitle">Convert large TXT files (10GB+ supported) to CSV format with data validation</p>
         </div>
 
         <div class="main-card">
@@ -607,7 +607,7 @@
                 <div class="info-card">
                     <i class="fas fa-file-alt"></i>
                     <h3>Large File Support</h3>
-                    <p>Handles files up to 1GB+ using chunked processing for memory efficiency</p>
+                    <p>Handles files up to 10GB+ using chunked upload and streaming processing</p>
                 </div>
                 <div class="info-card">
                     <i class="fas fa-magic"></i>
@@ -634,7 +634,7 @@
             <div class="file-upload-area" id="fileUploadArea">
                 <i class="fas fa-cloud-upload-alt upload-icon"></i>
                 <div class="upload-text">Drag & drop your TXT file here</div>
-                <div class="upload-hint">or click to browse (supports .txt files up to 1GB+)</div>
+                <div class="upload-hint">or click to browse (supports .txt files up to 10GB+)</div>
                 <input type="file" id="txtFile" accept=".txt">
             </div>
 
@@ -726,6 +726,10 @@
 
         let uploadedFile = null;
         let fileId = null;
+        let uploadedFilename = null;
+
+        // Chunk size: 50MB per chunk for reliable uploads
+        const CHUNK_SIZE = 50 * 1024 * 1024;
 
         function formatFileSize(bytes) {
             if (bytes === 0) return '0 Bytes';
@@ -759,14 +763,15 @@
             }
 
             uploadedFile = file;
+            uploadedFilename = file.name;
             fileName.textContent = file.name;
             fileSize.textContent = formatFileSize(file.size);
             fileInfo.classList.add('show');
             fileUploadArea.style.display = 'none';
             hideStatus();
 
-            // Show preview
-            await loadPreview(file);
+            // Upload and show preview
+            await uploadFileChunked(file);
         });
 
         // Drag and drop
@@ -787,12 +792,13 @@
             if (file && file.name.toLowerCase().endsWith('.txt')) {
                 fileInput.files = e.dataTransfer.files;
                 uploadedFile = file;
+                uploadedFilename = file.name;
                 fileName.textContent = file.name;
                 fileSize.textContent = formatFileSize(file.size);
                 fileInfo.classList.add('show');
                 fileUploadArea.style.display = 'none';
                 hideStatus();
-                await loadPreview(file);
+                await uploadFileChunked(file);
             } else {
                 showStatus('Please upload a .txt file', 'error');
             }
@@ -803,6 +809,7 @@
             fileInput.value = '';
             uploadedFile = null;
             fileId = null;
+            uploadedFilename = null;
             fileInfo.classList.remove('show');
             fileUploadArea.style.display = 'block';
             previewSection.classList.remove('show');
@@ -813,31 +820,106 @@
             hideStatus();
         });
 
-        // Load preview
-        async function loadPreview(file) {
-            showStatus('Loading preview...', 'info');
+        // Upload file in chunks for large file support (10GB+)
+        async function uploadFileChunked(file) {
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            let currentFileId = null;
 
-            const formData = new FormData();
-            formData.append('file', file);
+            // Show upload progress
+            progressSection.classList.add('show');
+            progressFill.style.width = '0%';
+            progressText.textContent = 'Uploading... 0%';
+
+            try {
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const start = chunkIndex * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    const chunk = file.slice(start, end);
+
+                    const formData = new FormData();
+                    formData.append('chunk', chunk);
+                    formData.append('chunkIndex', chunkIndex);
+                    formData.append('totalChunks', totalChunks);
+                    formData.append('filename', file.name);
+                    if (currentFileId) {
+                        formData.append('fileId', currentFileId);
+                    }
+
+                    const response = await fetch('/api/txt-to-csv/upload-chunk', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    // Check if response is JSON
+                    const contentType = response.headers.get('content-type');
+                    if (!contentType || !contentType.includes('application/json')) {
+                        const text = await response.text();
+                        throw new Error(`Server error: ${response.status}. Please try again.`);
+                    }
+
+                    const data = await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Upload failed');
+                    }
+
+                    currentFileId = data.fileId;
+
+                    // Update progress
+                    const progress = Math.round(((chunkIndex + 1) / totalChunks) * 100);
+                    progressFill.style.width = `${progress}%`;
+                    progressText.textContent = `Uploading... ${progress}% (${formatFileSize(end)} / ${formatFileSize(file.size)})`;
+                }
+
+                fileId = currentFileId;
+                progressText.textContent = 'Upload complete! Loading preview...';
+
+                // Now get preview
+                await loadPreview();
+
+            } catch (error) {
+                showStatus(`Upload Error: ${error.message}`, 'error');
+                progressSection.classList.remove('show');
+            }
+        }
+
+        // Load preview (after chunked upload)
+        async function loadPreview() {
+            showStatus('Loading preview...', 'info');
 
             try {
                 const response = await fetch('/api/txt-to-csv/preview', {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        file_id: fileId,
+                        filename: uploadedFilename
+                    })
                 });
+
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    throw new Error(`Server error: ${response.status}. Please try again.`);
+                }
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    fileId = data.file_id;
                     displayPreview(data.preview);
                     convertBtn.classList.add('show');
+                    progressSection.classList.remove('show');
                     hideStatus();
                 } else {
                     showStatus(`Error: ${data.error}`, 'error');
+                    progressSection.classList.remove('show');
                 }
             } catch (error) {
                 showStatus(`Error: ${error.message}`, 'error');
+                progressSection.classList.remove('show');
             }
         }
 
@@ -886,11 +968,13 @@
 
         // Convert button
         convertBtn.addEventListener('click', async () => {
-            if (!uploadedFile || !fileId) return;
+            if (!fileId) return;
 
             convertBtn.disabled = true;
             convertBtn.innerHTML = '<span class="spinner"></span> Converting...';
             progressSection.classList.add('show');
+            progressFill.style.width = '0%';
+            progressText.textContent = 'Converting... this may take a while for large files';
             resultsSection.classList.remove('show');
             downloadBtn.style.display = 'none';
             errorList.style.display = 'none';
@@ -906,6 +990,13 @@
                         file_id: fileId
                     })
                 });
+
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    throw new Error(`Server error: ${response.status}. Please try again.`);
+                }
 
                 const data = await response.json();
 

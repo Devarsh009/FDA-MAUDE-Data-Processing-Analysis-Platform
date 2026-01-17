@@ -241,28 +241,33 @@ class TxtToCsvConverter:
 
         # Detect encoding
         encoding = self.detect_encoding(input_path)
+        print(f"[TXT-CSV] Detected encoding: {encoding}")
 
         # Auto-detect delimiter if not provided
         if delimiter is None:
             delimiter = self.detect_delimiter(input_path)
 
         self.stats['delimiter_used'] = repr(delimiter)
+        print(f"[TXT-CSV] Using delimiter: {repr(delimiter)}")
 
         # Count expected columns from header
         expected_columns = self.count_columns(input_path, delimiter, encoding)
         self.stats['columns_detected'] = expected_columns
+        print(f"[TXT-CSV] Detected {expected_columns} columns")
 
         if expected_columns == 0:
             self.stats['errors'].append("Could not detect columns in file")
             return self.stats
 
         bytes_processed = 0
+        rows_written = 0
 
         try:
             with open(input_path, 'r', encoding=encoding, errors='replace') as infile, \
-                 open(output_path, 'w', newline='', encoding='utf-8') as outfile:
-
-                csv_writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL)
+                 open(output_path, 'w', newline='', encoding='utf-8-sig') as outfile:
+                # Use utf-8-sig to add BOM for Excel compatibility on Windows
+                # Use QUOTE_ALL to ensure proper CSV formatting
+                csv_writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
 
                 for line_number, line in enumerate(infile, 1):
                     # Track progress
@@ -287,11 +292,16 @@ class TxtToCsvConverter:
                     # Clean each field
                     cleaned_fields = [self.clean_field(f) for f in fields]
 
+                    # Debug first few rows
+                    if line_number <= 3:
+                        print(f"[TXT-CSV] Row {line_number}: {len(cleaned_fields)} fields")
+
                     # Validate row
                     is_valid, error_msg = self.validate_row(cleaned_fields, expected_columns, line_number)
 
                     if is_valid:
                         csv_writer.writerow(cleaned_fields)
+                        rows_written += 1
                         self.stats['valid_rows'] += 1
                     else:
                         self.stats['invalid_rows'] += 1
@@ -310,11 +320,17 @@ class TxtToCsvConverter:
                             cleaned_fields = cleaned_fields[:expected_columns-1] + [extra]
 
                         csv_writer.writerow(cleaned_fields)
+                        rows_written += 1
                         self.stats['valid_rows'] += 1  # Count as valid after fixing
                         self.stats['invalid_rows'] -= 1
 
+            print(f"[TXT-CSV] Wrote {rows_written} rows to CSV")
+
         except Exception as e:
             self.stats['errors'].append(f"Processing error: {str(e)}")
+            print(f"[TXT-CSV] ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
         # Calculate processing time
         end_time = datetime.now()
@@ -323,6 +339,12 @@ class TxtToCsvConverter:
         # Final progress callback
         if progress_callback:
             progress_callback(100, self.stats['total_rows'])
+
+        # Verify output file
+        if os.path.exists(output_path):
+            output_size = os.path.getsize(output_path)
+            print(f"[TXT-CSV] Output file size: {output_size} bytes")
+            self.stats['output_file_size'] = output_size
 
         return self.stats
 

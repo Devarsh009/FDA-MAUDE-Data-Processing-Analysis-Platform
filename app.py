@@ -17,6 +17,7 @@ from backend.imdrf_insights import (
     get_top_manufacturers_for_prefix
 )
 from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
+from backend.csv_viewer import LargeCSVViewer, get_csv_page, get_csv_info
 from config import (
     GROQ_API_KEY, SECRET_KEY, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS,
     MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
@@ -24,7 +25,9 @@ from config import (
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size for large TXT files
+# Note: MAX_CONTENT_LENGTH is set to None to allow streaming uploads of 10GB+ files
+# Validation is done at the application level for specific routes
+app.config['MAX_CONTENT_LENGTH'] = None
 # Use /tmp for Vercel (serverless) or temp directory for local
 if os.path.exists('/tmp'):
     app.config['UPLOAD_FOLDER'] = os.path.join('/tmp', 'maude_uploads')
@@ -498,26 +501,108 @@ def txt_to_csv_page():
     return render_template('txt_to_csv.html', user=current_user)
 
 
+@app.route('/api/txt-to-csv/upload-chunk', methods=['POST'])
+@login_required
+def api_txt_upload_chunk():
+    """Handle chunked file upload for large TXT files (10GB+ support)."""
+    try:
+        chunk = request.files.get('chunk')
+        chunk_index = int(request.form.get('chunkIndex', 0))
+        total_chunks = int(request.form.get('totalChunks', 1))
+        file_id = request.form.get('fileId')
+        original_filename = request.form.get('filename', 'upload.txt')
+
+        if not chunk:
+            return jsonify({'error': 'No chunk data received'}), 400
+
+        # Create file_id on first chunk
+        if chunk_index == 0:
+            file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+
+        if not file_id:
+            return jsonify({'error': 'Missing file ID'}), 400
+
+        # Secure the filename
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+
+        # Append chunk to file (create on first chunk, append on subsequent)
+        mode = 'wb' if chunk_index == 0 else 'ab'
+        with open(file_path, mode) as f:
+            # Stream the chunk in smaller pieces to avoid memory issues
+            while True:
+                data = chunk.read(8192)  # 8KB at a time
+                if not data:
+                    break
+                f.write(data)
+
+        # Return file_id and status
+        is_complete = (chunk_index + 1) >= total_chunks
+
+        return jsonify({
+            'success': True,
+            'fileId': file_id,
+            'chunkIndex': chunk_index,
+            'isComplete': is_complete
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Chunk upload failed: {str(e)}'}), 400
+
+
 @app.route('/api/txt-to-csv/preview', methods=['POST'])
 @login_required
 def api_txt_preview():
-    """Upload TXT file and get preview."""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-
-    if not file.filename.lower().endswith('.txt'):
-        return jsonify({'error': 'Invalid file type. Please upload a .txt file.'}), 400
-
+    """Get preview for already uploaded TXT file (by file_id) or upload small file."""
     try:
+        # Check if this is a file_id based preview request (for chunked uploads)
+        if request.is_json:
+            data = request.get_json()
+            file_id = data.get('file_id')
+            original_filename = data.get('filename', 'upload.txt')
+
+            if file_id:
+                filename = secure_filename(original_filename)
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+
+                if not os.path.exists(file_path):
+                    return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+                # Get preview
+                preview = get_txt_preview(file_path, num_rows=10)
+
+                # Store file path in session
+                session[f'txt_file_{file_id}'] = file_path
+
+                return jsonify({
+                    'success': True,
+                    'file_id': file_id,
+                    'preview': preview
+                }), 200
+
+        # Fallback: Handle traditional file upload for smaller files
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        if not file.filename.lower().endswith('.txt'):
+            return jsonify({'error': 'Invalid file type. Please upload a .txt file.'}), 400
+
         # Save uploaded file with unique name
         filename = secure_filename(file.filename)
         file_id = f"{current_user.id}_{os.urandom(8).hex()}"
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
-        file.save(input_path)
+
+        # Stream file to disk in chunks
+        with open(input_path, 'wb') as f:
+            while True:
+                chunk = file.read(8192)  # 8KB chunks
+                if not chunk:
+                    break
+                f.write(chunk)
 
         # Get preview
         preview = get_txt_preview(input_path, num_rows=10)
@@ -592,6 +677,182 @@ def api_txt_download(file_id):
             download_name=file_info['filename'],
             mimetype='text/csv'
         )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+# CSV Viewer Routes
+@app.route('/csv-viewer')
+@login_required
+def csv_viewer_page():
+    """Render CSV viewer page."""
+    return render_template('csv_viewer.html', user=current_user)
+
+
+@app.route('/api/csv-viewer/upload-chunk', methods=['POST'])
+@login_required
+def api_csv_upload_chunk():
+    """Handle chunked file upload for CSV viewer."""
+    try:
+        chunk = request.files.get('chunk')
+        chunk_index = int(request.form.get('chunkIndex', 0))
+        total_chunks = int(request.form.get('totalChunks', 1))
+        file_id = request.form.get('fileId')
+        original_filename = request.form.get('filename', 'upload.csv')
+
+        if not chunk:
+            return jsonify({'error': 'No chunk data received'}), 400
+
+        # Create file_id on first chunk
+        if chunk_index == 0:
+            file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+
+        if not file_id:
+            return jsonify({'error': 'Missing file ID'}), 400
+
+        # Secure the filename
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"csv_{file_id}_{filename}")
+
+        # Append chunk to file
+        mode = 'wb' if chunk_index == 0 else 'ab'
+        with open(file_path, mode) as f:
+            while True:
+                data = chunk.read(8192)
+                if not data:
+                    break
+                f.write(data)
+
+        return jsonify({
+            'success': True,
+            'fileId': file_id,
+            'chunkIndex': chunk_index,
+            'isComplete': (chunk_index + 1) >= total_chunks
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Chunk upload failed: {str(e)}'}), 400
+
+
+@app.route('/api/csv-viewer/info', methods=['POST'])
+@login_required
+def api_csv_info():
+    """Get CSV file information."""
+    try:
+        data = request.get_json()
+        file_id = data.get('file_id')
+        original_filename = data.get('filename', 'upload.csv')
+
+        if not file_id:
+            return jsonify({'error': 'Missing file_id'}), 400
+
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"csv_{file_id}_{filename}")
+
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        # Store in session
+        session[f'csv_viewer_{file_id}'] = file_path
+
+        # Get file info
+        info = get_csv_info(file_path)
+
+        return jsonify({
+            'success': True,
+            'info': info
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/csv-viewer/page', methods=['POST'])
+@login_required
+def api_csv_page():
+    """Get a page of CSV data."""
+    try:
+        data = request.get_json()
+        file_id = data.get('file_id')
+        original_filename = data.get('filename', 'upload.csv')
+        page = data.get('page', 1)
+        page_size = data.get('page_size', 100)
+
+        if not file_id:
+            return jsonify({'error': 'Missing file_id'}), 400
+
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"csv_{file_id}_{filename}")
+
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        # Get page data
+        page_data = get_csv_page(file_path, page, page_size)
+
+        return jsonify(page_data), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/csv-viewer/search', methods=['POST'])
+@login_required
+def api_csv_search():
+    """Search in CSV file."""
+    try:
+        data = request.get_json()
+        file_id = data.get('file_id')
+        original_filename = data.get('filename', 'upload.csv')
+        search_term = data.get('search_term', '')
+
+        if not file_id or not search_term:
+            return jsonify({'error': 'Missing file_id or search_term'}), 400
+
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"csv_{file_id}_{filename}")
+
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        # Search in file
+        viewer = LargeCSVViewer()
+        results = viewer.search_in_file(file_path, search_term)
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/csv-viewer/column-stats', methods=['POST'])
+@login_required
+def api_csv_column_stats():
+    """Get column statistics."""
+    try:
+        data = request.get_json()
+        file_id = data.get('file_id')
+        original_filename = data.get('filename', 'upload.csv')
+        column_index = data.get('column_index', 0)
+
+        if not file_id:
+            return jsonify({'error': 'Missing file_id'}), 400
+
+        filename = secure_filename(original_filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"csv_{file_id}_{filename}")
+
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        # Get column stats
+        viewer = LargeCSVViewer()
+        stats = viewer.get_column_stats(file_path, column_index)
+
+        return jsonify({
+            'success': True,
+            'stats': stats
+        }), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400
