@@ -1,12 +1,27 @@
 """
 Deterministic IMDRF mapping with Groq fallback (Annex-controlled).
+
+Scalability Features:
+- Batch processing for Groq API calls (reduces API calls by processing unique problems together)
+- Deterministic-only mode for large files (skip Groq entirely for fast processing)
+- Progress callback support for real-time feedback
+- Aggressive caching to avoid repeated API calls
 """
 import json
 import os
 import pandas as pd
 import re
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, List, Callable, Set
 from backend.groq_client import GroqClient
+
+
+# Threshold for deterministic-only mode (rows)
+LARGE_FILE_THRESHOLD = 1000
+# Batch size for Groq API calls
+GROQ_BATCH_SIZE = 10
+# Rate limit delay between batches (seconds)
+GROQ_RATE_LIMIT_DELAY = 0.5
 
 
 class IMDRFMapper:
@@ -495,3 +510,309 @@ Return format (JSON only):
     def validate_code(self, code: str) -> bool:
         """Validate that code exists in Annex."""
         return code in self.annex_codes
+
+    # ==================== SCALABILITY METHODS ====================
+
+    def map_device_problems_batch(
+        self,
+        device_problems: List[str],
+        deterministic_only: bool = False,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> Dict[str, str]:
+        """
+        Batch process multiple device problems efficiently.
+
+        This method:
+        1. Collects unique problems
+        2. Applies deterministic mapping first (fast)
+        3. Batches Groq API calls for remaining problems (if not deterministic_only)
+        4. Caches all results for future use
+
+        Args:
+            device_problems: List of device problem strings
+            deterministic_only: If True, skip all Groq API calls (fast mode)
+            progress_callback: Optional callback(current, total, message) for progress updates
+
+        Returns:
+            Dictionary mapping device problem -> IMDRF code
+        """
+        results = {}
+
+        # Step 1: Collect unique problems
+        unique_problems = set()
+        for prob in device_problems:
+            if self._is_blank(prob):
+                continue
+            raw = str(prob).strip()
+            if raw and raw.lower() != "nan":
+                # Handle semicolon-separated problems
+                for part in raw.split(";"):
+                    part = part.strip()
+                    if part and part.lower() != "nan":
+                        unique_problems.add(part)
+
+        total_unique = len(unique_problems)
+        if progress_callback:
+            progress_callback(0, total_unique, f"Processing {total_unique} unique device problems...")
+
+        # Step 2: Deterministic mapping pass (fast)
+        needs_groq = []
+        processed = 0
+
+        for prob in unique_problems:
+            pn = self._norm_term(prob)
+
+            # Check cache first
+            if pn in self.cache:
+                results[prob] = self.cache[pn]
+                processed += 1
+                continue
+
+            # Try deterministic match
+            code = self._map_one_problem_to_code(prob)
+            if code:
+                results[prob] = code
+                self.cache[pn] = code
+                processed += 1
+            else:
+                needs_groq.append(prob)
+
+            if progress_callback and processed % 100 == 0:
+                progress_callback(processed, total_unique, f"Deterministic mapping: {processed}/{total_unique}")
+
+        # Save cache after deterministic pass
+        self._save_cache()
+
+        if progress_callback:
+            progress_callback(processed, total_unique, f"Deterministic mapping complete. {len(needs_groq)} problems need AI mapping.")
+
+        # Step 3: Groq batch processing (if enabled and needed)
+        if not deterministic_only and needs_groq and self.groq_client and self.groq_client.available:
+            groq_results = self._batch_groq_mapping(needs_groq, progress_callback, processed, total_unique)
+            results.update(groq_results)
+
+            # Cache Groq results
+            for prob, code in groq_results.items():
+                pn = self._norm_term(prob)
+                self.cache[pn] = code
+            self._save_cache()
+        elif needs_groq:
+            # Mark as empty for problems that couldn't be mapped
+            for prob in needs_groq:
+                results[prob] = ""
+
+        if progress_callback:
+            progress_callback(total_unique, total_unique, "Mapping complete!")
+
+        return results
+
+    def _batch_groq_mapping(
+        self,
+        problems: List[str],
+        progress_callback: Optional[Callable[[int, int, str], None]],
+        start_count: int,
+        total_count: int
+    ) -> Dict[str, str]:
+        """
+        Batch Groq API calls for multiple problems.
+
+        Uses a single API call with multiple problems to reduce API overhead.
+        Falls back to individual calls if batch fails.
+        """
+        results = {}
+
+        # Process in batches
+        for i in range(0, len(problems), GROQ_BATCH_SIZE):
+            batch = problems[i:i + GROQ_BATCH_SIZE]
+            batch_num = i // GROQ_BATCH_SIZE + 1
+            total_batches = (len(problems) + GROQ_BATCH_SIZE - 1) // GROQ_BATCH_SIZE
+
+            if progress_callback:
+                progress_callback(
+                    start_count + i,
+                    total_count,
+                    f"AI mapping batch {batch_num}/{total_batches}..."
+                )
+
+            # Try batch API call first
+            batch_results = self._groq_batch_call(batch)
+
+            if batch_results:
+                results.update(batch_results)
+            else:
+                # Fallback to individual calls if batch fails
+                for prob in batch:
+                    code = self._groq_fallback(prob)
+                    results[prob] = code if code else ""
+
+            # Rate limiting delay between batches
+            if i + GROQ_BATCH_SIZE < len(problems):
+                time.sleep(GROQ_RATE_LIMIT_DELAY)
+
+        return results
+
+    def _groq_batch_call(self, problems: List[str]) -> Optional[Dict[str, str]]:
+        """
+        Make a single Groq API call for multiple problems.
+
+        Returns None if the batch call fails, indicating fallback to individual calls.
+        """
+        if not self.groq_client or not self.groq_client.available:
+            return None
+
+        if not problems:
+            return {}
+
+        # Build batch prompt
+        problems_list = "\n".join([f'{i+1}. "{p}"' for i, p in enumerate(problems)])
+        terms_str = ', '.join([f'"{t}"' for t in self.level1_terms[:50]])
+
+        prompt = f"""You are mapping device problems to IMDRF Level-1 codes.
+
+Device Problems to map:
+{problems_list}
+
+Available Level-1 terms (from IMDRF Annex):
+{terms_str}
+
+CRITICAL RULES:
+- Return ONLY valid JSON
+- For each problem number, provide the most appropriate Level-1 term from the list
+- If no good match exists, use "NO_MATCH"
+- Return a JSON object with problem numbers as keys
+
+Return format (JSON only):
+{{"1": "<term or NO_MATCH>", "2": "<term or NO_MATCH>", ...}}"""
+
+        try:
+            response = self.groq_client.client.chat.completions.create(
+                model=self.groq_client.model,
+                messages=[
+                    {"role": "system", "content": "You are an IMDRF coding expert. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=500,
+                response_format={"type": "json_object"}
+            )
+
+            result = json.loads(response.choices[0].message.content)
+
+            # Convert results back to problem -> code mapping
+            batch_results = {}
+            for i, prob in enumerate(problems):
+                key = str(i + 1)
+                selected = result.get(key, "NO_MATCH")
+
+                if selected == "NO_MATCH" or not selected:
+                    batch_results[prob] = ""
+                else:
+                    selected_norm = self._norm_term(selected)
+                    if selected_norm in self.level1_map:
+                        batch_results[prob] = self.level1_map[selected_norm]
+                    else:
+                        batch_results[prob] = ""
+
+            return batch_results
+
+        except Exception as e:
+            print(f"Warning: Groq batch call failed: {e}")
+            return None
+
+    def process_dataframe_scalable(
+        self,
+        df: pd.DataFrame,
+        device_problem_column: str,
+        output_column: str = "IMDRF Code",
+        deterministic_only: bool = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> pd.DataFrame:
+        """
+        Process an entire DataFrame with scalable IMDRF mapping.
+
+        Automatically enables deterministic-only mode for large files.
+
+        Args:
+            df: Input DataFrame
+            device_problem_column: Name of the column containing device problems
+            output_column: Name of the output column for IMDRF codes
+            deterministic_only: Force deterministic-only mode. If None, auto-detect based on file size.
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            DataFrame with IMDRF codes added
+        """
+        row_count = len(df)
+
+        # Auto-detect mode based on file size
+        if deterministic_only is None:
+            deterministic_only = row_count >= LARGE_FILE_THRESHOLD
+            if deterministic_only and progress_callback:
+                progress_callback(0, row_count, f"Large file detected ({row_count} rows). Using fast deterministic-only mode.")
+
+        # Extract all device problems
+        device_problems = df[device_problem_column].tolist()
+
+        # Batch process
+        mapping = self.map_device_problems_batch(
+            device_problems,
+            deterministic_only=deterministic_only,
+            progress_callback=progress_callback
+        )
+
+        # Apply mapping to DataFrame
+        def get_code(device_problem):
+            if self._is_blank(device_problem):
+                return ""
+            raw = str(device_problem).strip()
+            if not raw or raw.lower() == "nan":
+                return ""
+
+            # Handle semicolon-separated problems
+            parts = [p.strip() for p in raw.split(";") if p.strip()]
+            if not parts:
+                return ""
+
+            codes_in_order = []
+            seen = set()
+
+            for part in parts:
+                code = mapping.get(part, "")
+                if not code:
+                    continue
+                if code not in seen:
+                    seen.add(code)
+                    codes_in_order.append(code)
+
+            return " | ".join(codes_in_order) if codes_in_order else ""
+
+        df[output_column] = df[device_problem_column].apply(get_code)
+
+        return df
+
+    def get_mapping_stats(self, mapping_results: Dict[str, str]) -> Dict:
+        """
+        Get statistics about mapping results.
+
+        Returns:
+            Dictionary with mapping statistics
+        """
+        total = len(mapping_results)
+        mapped = sum(1 for code in mapping_results.values() if code)
+        unmapped = total - mapped
+
+        # Count by level
+        level1_count = sum(1 for code in mapping_results.values() if code and len(code) == 3)
+        level2_count = sum(1 for code in mapping_results.values() if code and len(code) == 5)
+        level3_count = sum(1 for code in mapping_results.values() if code and len(code) == 7)
+
+        return {
+            "total_unique_problems": total,
+            "mapped": mapped,
+            "unmapped": unmapped,
+            "mapping_rate": f"{(mapped/total*100):.1f}%" if total > 0 else "0%",
+            "level1_codes": level1_count,
+            "level2_codes": level2_count,
+            "level3_codes": level3_count,
+            "cache_size": len(self.cache)
+        }

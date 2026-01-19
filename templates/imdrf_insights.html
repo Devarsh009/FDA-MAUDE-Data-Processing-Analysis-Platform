@@ -438,12 +438,58 @@
         <div class="header">
             <h1>
                 <i class="fas fa-chart-line"></i>
-                IMDRF Prefix Insights
+                IMDRF Code Insights
             </h1>
             <p class="subtitle">Analyze IMDRF code trends across manufacturers with baseline comparisons</p>
         </div>
 
         <div class="main-card">
+            <!-- IMDRF Level Selector -->
+            <div class="level-selector-section" style="margin-bottom: 25px;">
+                <h2 class="section-title">
+                    <i class="fas fa-layer-group"></i>
+                    Select IMDRF Analysis Level
+                </h2>
+                <div class="level-options" style="display: flex; gap: 15px; flex-wrap: wrap;">
+                    <label class="level-option" style="flex: 1; min-width: 200px; cursor: pointer;">
+                        <input type="radio" name="imdrfLevel" value="1" checked style="display: none;">
+                        <div class="level-card" style="padding: 15px; border: 2px solid var(--border); border-radius: 10px; background: white; transition: all 0.3s ease;">
+                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 5px;">
+                                <i class="fas fa-check-circle" style="color: var(--primary); margin-right: 5px;"></i>
+                                Level-1 (3 characters)
+                            </div>
+                            <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                                e.g., A05, E24 - Broad category analysis
+                            </div>
+                        </div>
+                    </label>
+                    <label class="level-option" style="flex: 1; min-width: 200px; cursor: pointer;">
+                        <input type="radio" name="imdrfLevel" value="2" style="display: none;">
+                        <div class="level-card" style="padding: 15px; border: 2px solid var(--border); border-radius: 10px; background: white; transition: all 0.3s ease;">
+                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 5px;">
+                                <i class="fas fa-circle" style="color: var(--text-secondary); margin-right: 5px;"></i>
+                                Level-2 (5 characters)
+                            </div>
+                            <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                                e.g., A0501, E2401 - Subcategory analysis
+                            </div>
+                        </div>
+                    </label>
+                    <label class="level-option" style="flex: 1; min-width: 200px; cursor: pointer;">
+                        <input type="radio" name="imdrfLevel" value="3" style="display: none;">
+                        <div class="level-card" style="padding: 15px; border: 2px solid var(--border); border-radius: 10px; background: white; transition: all 0.3s ease;">
+                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 5px;">
+                                <i class="fas fa-circle" style="color: var(--text-secondary); margin-right: 5px;"></i>
+                                Level-3 (7 characters)
+                            </div>
+                            <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                                e.g., A050101 - Detailed code analysis
+                            </div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
             <div class="upload-section">
                 <h2 class="section-title">
                     <i class="fas fa-file-csv"></i>
@@ -462,20 +508,27 @@
                     <div style="flex: 1;">
                         <div id="fileName" style="font-weight: 600; color: var(--text-primary);"></div>
                         <div id="fileSize" style="font-size: 0.85rem; color: var(--text-secondary);"></div>
+                        <div id="levelInfo" style="font-size: 0.85rem; color: var(--primary); font-weight: 500;"></div>
                     </div>
                     <button type="button" id="removeFile" style="background: var(--error); color: white; border: none; border-radius: 50%; width: 35px; height: 35px; cursor: pointer;">
                         <i class="fas fa-times"></i>
+                    </button>
+                </div>
+
+                <div id="downloadCountsTop" style="display: none; margin-top: 12px;">
+                    <button type="button" class="analyze-btn" id="downloadCountsAllBtn" style="padding: 10px; font-size: 0.95rem;">
+                        <i class="fas fa-file-excel"></i> Download IMDRF Code Counts (All Levels)
                     </button>
                 </div>
             </div>
 
             <div class="controls-section" id="controlsSection">
                 <div class="form-group">
-                    <label for="prefixSelect">
-                        <i class="fas fa-code"></i> IMDRF Prefix
+                    <label for="prefixSelect" id="prefixLabel">
+                        <i class="fas fa-code"></i> IMDRF Code
                     </label>
                     <select id="prefixSelect">
-                        <option value="">Select a prefix...</option>
+                        <option value="">Select a code...</option>
                     </select>
                 </div>
 
@@ -551,22 +604,68 @@
         let uploadedFile = null;
         let preparedData = null;
         let selectedManufacturers = [];
+        let currentLevel = 1;
 
         const fileInput = document.getElementById('csvFile');
         const fileUploadArea = document.getElementById('fileUploadArea');
         const fileInfo = document.getElementById('fileInfo');
         const fileName = document.getElementById('fileName');
         const fileSize = document.getElementById('fileSize');
+        const levelInfo = document.getElementById('levelInfo');
         const removeFileBtn = document.getElementById('removeFile');
         const controlsSection = document.getElementById('controlsSection');
         const prefixSelect = document.getElementById('prefixSelect');
+        const prefixLabel = document.getElementById('prefixLabel');
         const grainSelect = document.getElementById('grainSelect');
         const thresholdInput = document.getElementById('thresholdInput');
         const manufacturerSelectGroup = document.getElementById('manufacturerSelectGroup');
         const manufacturerCheckboxes = document.getElementById('manufacturerCheckboxes');
         const analyzeBtn = document.getElementById('analyzeBtn');
+        const downloadCountsAllBtn = document.getElementById('downloadCountsAllBtn');
+        const downloadCountsTop = document.getElementById('downloadCountsTop');
         const status = document.getElementById('status');
         const resultsSection = document.getElementById('resultsSection');
+        const levelRadios = document.querySelectorAll('input[name="imdrfLevel"]');
+
+        // Level label mappings
+        const levelLabels = {
+            1: 'Level-1 Code (3 chars)',
+            2: 'Level-2 Code (5 chars)',
+            3: 'Level-3 Code (7 chars)'
+        };
+
+        // Handle level selector visual feedback
+        function updateLevelSelection() {
+            document.querySelectorAll('.level-option').forEach(option => {
+                const radio = option.querySelector('input[type="radio"]');
+                const card = option.querySelector('.level-card');
+                const icon = card.querySelector('i');
+
+                if (radio.checked) {
+                    card.style.borderColor = 'var(--primary)';
+                    card.style.background = '#f0f7ff';
+                    icon.className = 'fas fa-check-circle';
+                    icon.style.color = 'var(--primary)';
+                    currentLevel = parseInt(radio.value);
+                } else {
+                    card.style.borderColor = 'var(--border)';
+                    card.style.background = 'white';
+                    icon.className = 'fas fa-circle';
+                    icon.style.color = 'var(--text-secondary)';
+                }
+            });
+        }
+
+        // Initialize level selector
+        levelRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                updateLevelSelection();
+                if (preparedData) {
+                    refreshPreparedData(currentLevel);
+                }
+            });
+        });
+        updateLevelSelection();
 
         function formatFileSize(bytes) {
             if (bytes === 0) return '0 Bytes';
@@ -585,6 +684,61 @@
             status.className = 'status';
         }
 
+        async function refreshPreparedData(level) {
+            if (!preparedData || !preparedData.file_id) {
+                return;
+            }
+
+            showStatus(`Updating to ${levelLabels[level]}...`, 'info');
+            resultsSection.classList.remove('show');
+            manufacturerSelectGroup.style.display = 'none';
+            analyzeBtn.classList.remove('show');
+            selectedManufacturers = [];
+
+            try {
+                const response = await fetch('/api/imdrf-insights/refresh', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        file_id: preparedData.file_id,
+                        level: level
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    preparedData = data;
+
+                    downloadCountsTop.style.display = 'block';
+
+                    downloadCountsTop.style.display = 'block';
+
+                    levelInfo.textContent = `Analysis Level: ${data.level_label || levelLabels[level]}`;
+                    prefixLabel.innerHTML = `<i class="fas fa-code"></i> ${levelLabels[level]}`;
+
+                    prefixSelect.innerHTML = '<option value="">Select a code...</option>';
+                    const prefixCounts = data.prefix_counts || {};
+                    data.all_prefixes.forEach(prefix => {
+                        const option = document.createElement('option');
+                        option.value = prefix;
+                        const count = prefixCounts[prefix] || 0;
+                        option.textContent = `${prefix} (${count})`;
+                        prefixSelect.appendChild(option);
+                    });
+
+                    controlsSection.classList.add('show');
+                    showStatus(`✅ Updated to ${data.level_label || 'Level-' + level}: ${data.rows_with_dates} rows with valid dates, ${data.all_prefixes.length} codes found`, 'success');
+                } else {
+                    showStatus(`❌ Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -600,6 +754,7 @@
 
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('level', currentLevel);
 
             try {
                 const response = await fetch('/api/imdrf-insights/prepare', {
@@ -612,17 +767,25 @@
                 if (response.ok) {
                     preparedData = data;
 
+                    // Update level info display
+                    levelInfo.textContent = `Analysis Level: ${data.level_label || levelLabels[currentLevel]}`;
+
+                    // Update prefix label based on level
+                    prefixLabel.innerHTML = `<i class="fas fa-code"></i> ${levelLabels[currentLevel]}`;
+
                     // Populate prefix dropdown
-                    prefixSelect.innerHTML = '<option value="">Select a prefix...</option>';
+                    prefixSelect.innerHTML = '<option value="">Select a code...</option>';
+                    const prefixCounts = data.prefix_counts || {};
                     data.all_prefixes.forEach(prefix => {
                         const option = document.createElement('option');
                         option.value = prefix;
-                        option.textContent = prefix;
+                        const count = prefixCounts[prefix] || 0;
+                        option.textContent = `${prefix} (${count})`;
                         prefixSelect.appendChild(option);
                     });
 
                     controlsSection.classList.add('show');
-                    showStatus(`✅ File processed: ${data.rows_with_dates} rows with valid dates, ${data.all_prefixes.length} IMDRF prefixes found`, 'success');
+                    showStatus(`✅ File processed at ${data.level_label || 'Level-' + currentLevel}: ${data.rows_with_dates} rows with valid dates, ${data.all_prefixes.length} codes found`, 'success');
                 } else {
                     showStatus(`❌ Error: ${data.error}`, 'error');
                 }
@@ -637,11 +800,22 @@
             preparedData = null;
             fileInfo.classList.remove('show');
             fileUploadArea.style.display = 'block';
+            downloadCountsTop.style.display = 'none';
             controlsSection.classList.remove('show');
             manufacturerSelectGroup.style.display = 'none';
             analyzeBtn.classList.remove('show');
             resultsSection.classList.remove('show');
+            levelInfo.textContent = '';
             hideStatus();
+        });
+
+        downloadCountsAllBtn.addEventListener('click', () => {
+            if (!preparedData || !preparedData.file_id) {
+                showStatus('❌ Please upload a file first', 'error');
+                return;
+            }
+            const url = `/api/imdrf-insights/download-code-counts-xlsx?file_id=${preparedData.file_id}`;
+            window.location.href = url;
         });
 
         prefixSelect.addEventListener('change', async () => {
@@ -655,7 +829,7 @@
 
             // Get top manufacturers for this prefix
             try {
-                const response = await fetch(`/api/imdrf-insights/top-manufacturers?prefix=${selectedPrefix}&file_id=${preparedData.file_id}`);
+                const response = await fetch(`/api/imdrf-insights/top-manufacturers?prefix=${selectedPrefix}&file_id=${preparedData.file_id}&level=${currentLevel}`);
                 const data = await response.json();
 
                 if (response.ok) {
@@ -727,7 +901,8 @@
                         prefix: prefixSelect.value,
                         manufacturers: selectedManufacturers,
                         grain: grainSelect.value,
-                        threshold_k: parseFloat(thresholdInput.value)
+                        threshold_k: parseFloat(thresholdInput.value),
+                        level: currentLevel
                     })
                 });
 
@@ -752,11 +927,12 @@
             // Display metrics
             const metricsGrid = document.getElementById('metricsGrid');
             const grainLabel = {D: 'Daily', W: 'Weekly', M: 'Monthly'}[data.grain] || 'Period';
+            const levelLabel = data.level_label || `Level-${data.level || currentLevel}`;
 
             metricsGrid.innerHTML = `
                 <div class="metric-card">
                     <div class="metric-value">${data.selected_prefix}</div>
-                    <div class="metric-label">Selected Prefix</div>
+                    <div class="metric-label">Selected Code (${levelLabel})</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">${data.universal_mean}</div>
@@ -764,7 +940,7 @@
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">${data.prefix_mean}</div>
-                    <div class="metric-label">Prefix Mean (${grainLabel})</div>
+                    <div class="metric-label">Code Mean (${grainLabel})</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">${selectedManufacturers.length}</div>
@@ -825,7 +1001,7 @@
             }
 
             const layout = {
-                title: `IMDRF Prefix ${data.selected_prefix} - Manufacturer Comparison`,
+                title: `IMDRF ${levelLabel} Code ${data.selected_prefix} - Manufacturer Comparison`,
                 xaxis: {title: 'Date'},
                 yaxis: {title: `Count (${grainLabel})`},
                 hovermode: 'x unified',

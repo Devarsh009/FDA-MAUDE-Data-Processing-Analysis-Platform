@@ -3,19 +3,24 @@ Flask application for MAUDE data processing web interface with authentication.
 """
 import os
 import json
+import csv
 from flask import Flask, request, render_template, send_file, jsonify, redirect, url_for, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
 import tempfile
+import io
 
 from backend.processor import MAUDEProcessor
 from backend.auth import AuthManager, User
 from backend.imdrf_insights import (
     prepare_data_for_insights,
     analyze_imdrf_insights,
-    get_top_manufacturers_for_prefix
+    get_top_manufacturers_for_prefix,
+    LEVEL_CONFIG,
+    get_imdrf_code_counts_all_levels
 )
+from backend.imdrf_annex_validator import get_annex_status
 from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
 from backend.csv_viewer import LargeCSVViewer, get_csv_page, get_csv_info
 from config import (
@@ -73,6 +78,144 @@ def load_user(user_id):
 def allowed_file(filename):
     """Check if file extension is allowed."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/api/imdrf-counts/download-xlsx', methods=['POST'])
+@login_required
+def api_imdrf_counts_download_xlsx():
+    """Upload a cleaned file and download IMDRF code counts for all levels as XLSX."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    file_ext = os.path.splitext(file.filename.lower())[1]
+    if file_ext not in {'.csv', '.xlsx', '.xls'}:
+        return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
+
+    temp_path = None
+
+    try:
+        filename = secure_filename(file.filename)
+        file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"counts_{file_id}_{filename}")
+        file.save(temp_path)
+
+        counts_by_level = get_imdrf_code_counts_all_levels(temp_path)
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "IMDRF Code Counts"
+
+        bold_font = Font(bold=True)
+
+        for level in [1, 2, 3]:
+            level_label = f"LEVEL-{level} Code"
+            ws.append([level_label, ""])
+            ws.cell(row=ws.max_row, column=1).font = bold_font
+
+            level_counts = counts_by_level.get(level, {})
+            for code in sorted(level_counts.keys()):
+                ws.append([code, level_counts.get(code, 0)])
+
+            ws.append(["", ""])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name='imdrf_code_counts_all_levels.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+@app.route('/api/imdrf-counts/download-csv', methods=['POST'])
+@login_required
+def api_imdrf_counts_download_csv():
+    """Upload a cleaned file and download IMDRF code counts as CSV (two columns)."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    file_ext = os.path.splitext(file.filename.lower())[1]
+    if file_ext not in {'.csv', '.xlsx', '.xls'}:
+        return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
+
+    level = request.form.get('level', 'all')
+    if level not in {'all', '1', '2', '3'}:
+        return jsonify({'error': 'Invalid level selection.'}), 400
+
+    temp_path = None
+
+    try:
+        filename = secure_filename(file.filename)
+        file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"counts_{file_id}_{filename}")
+        file.save(temp_path)
+
+        counts_by_level = get_imdrf_code_counts_all_levels(temp_path)
+
+        rows = []
+        if level == 'all':
+            for level_num in [1, 2, 3]:
+                level_counts = counts_by_level.get(level_num, {})
+                for code, count in level_counts.items():
+                    rows.append((code, count))
+        else:
+            level_num = int(level)
+            level_counts = counts_by_level.get(level_num, {})
+            for code, count in level_counts.items():
+                rows.append((code, count))
+
+        rows.sort(key=lambda x: x[0])
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['IMDRF Code', 'Count'])
+        for code, count in rows:
+            writer.writerow([code, count])
+
+        csv_bytes = io.BytesIO(output.getvalue().encode('utf-8'))
+        csv_bytes.seek(0)
+
+        level_label = 'all-levels' if level == 'all' else f"level-{level}"
+        download_name = f"imdrf_code_counts_{level_label}.csv"
+
+        return send_file(
+            csv_bytes,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype='text/csv'
+        )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def send_password_reset_email(email: str, token: str):
@@ -251,6 +394,13 @@ def index():
     return render_template('index.html', user=current_user)
 
 
+@app.route('/imdrf-code-counts')
+@login_required
+def imdrf_code_counts_page():
+    """Render IMDRF code counts download page."""
+    return render_template('imdrf_code_counts.html', user=current_user)
+
+
 @app.route('/process', methods=['POST'])
 @login_required
 def process_file():
@@ -371,6 +521,11 @@ def api_prepare_insights():
     if file_ext not in allowed_extensions:
         return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
 
+    # Get level from form data (default to 1 for backward compatibility)
+    level = int(request.form.get('level', 1))
+    if level not in [1, 2, 3]:
+        return jsonify({'error': 'Invalid level. Must be 1, 2, or 3.'}), 400
+
     try:
         # Save uploaded file with unique name
         filename = secure_filename(file.filename)
@@ -378,20 +533,72 @@ def api_prepare_insights():
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
         file.save(input_path)
 
-        # Prepare data for insights
-        result = prepare_data_for_insights(input_path)
+        # Prepare data for insights at the specified level
+        result = prepare_data_for_insights(input_path, level=level)
 
-        # Store file info in session for later use
-        session[f'insights_file_{file_id}'] = input_path
+        # Store file info in session for later use (level can be toggled later)
+        session[f'insights_file_{file_id}'] = {
+            'path': input_path
+        }
 
         return jsonify({
             'success': True,
             'file_id': file_id,
             'all_prefixes': result['all_prefixes'],
             'all_manufacturers': result['all_manufacturers'],
+            'prefix_counts': result.get('prefix_counts', {}),
             'total_rows': result['total_rows'],
             'rows_with_imdrf': result['rows_with_imdrf'],
-            'rows_with_dates': result['rows_with_dates']
+            'rows_with_dates': result['rows_with_dates'],
+            'level': level,
+            'level_label': result.get('level_label', f'Level-{level}')
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/imdrf-insights/refresh', methods=['POST'])
+@login_required
+def api_refresh_insights():
+    """Re-prepare IMDRF insights data for a new level without re-uploading."""
+    data = request.get_json() or {}
+
+    file_id = data.get('file_id')
+    level = int(data.get('level', 1))
+
+    if not file_id:
+        return jsonify({'error': 'Missing file_id parameter'}), 400
+
+    if level not in [1, 2, 3]:
+        return jsonify({'error': 'Invalid level. Must be 1, 2, or 3.'}), 400
+
+    try:
+        file_info = session.get(f'insights_file_{file_id}')
+        if not file_info:
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        if isinstance(file_info, str):
+            file_path = file_info
+        else:
+            file_path = file_info.get('path')
+
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        result = prepare_data_for_insights(file_path, level=level)
+
+        return jsonify({
+            'success': True,
+            'file_id': file_id,
+            'all_prefixes': result['all_prefixes'],
+            'all_manufacturers': result['all_manufacturers'],
+            'prefix_counts': result.get('prefix_counts', {}),
+            'total_rows': result['total_rows'],
+            'rows_with_imdrf': result['rows_with_imdrf'],
+            'rows_with_dates': result['rows_with_dates'],
+            'level': level,
+            'level_label': result.get('level_label', f'Level-{level}')
         }), 200
 
     except Exception as e:
@@ -409,13 +616,26 @@ def api_top_manufacturers():
         return jsonify({'error': 'Missing prefix or file_id parameter'}), 400
 
     try:
-        # Retrieve file path from session
-        file_path = session.get(f'insights_file_{file_id}')
+        # Retrieve file info from session
+        file_info = session.get(f'insights_file_{file_id}')
+        if not file_info:
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        # Handle both old format (string) and new format (dict)
+        if isinstance(file_info, str):
+            file_path = file_info
+        else:
+            file_path = file_info.get('path')
+
+        level = int(request.args.get('level', 1))
+        if level not in [1, 2, 3]:
+            return jsonify({'error': 'Invalid level. Must be 1, 2, or 3.'}), 400
+
         if not file_path or not os.path.exists(file_path):
             return jsonify({'error': 'File not found. Please upload again.'}), 404
 
-        # Prepare data again (in memory)
-        result = prepare_data_for_insights(file_path)
+        # Prepare data again (in memory) at the same level
+        result = prepare_data_for_insights(file_path, level=level)
         df_exploded = result['df_exploded']
         mfr_col = result['mfr_col']
 
@@ -447,22 +667,36 @@ def api_analyze_insights():
         return jsonify({'error': 'Missing required parameters'}), 400
 
     try:
-        # Retrieve file path from session
-        file_path = session.get(f'insights_file_{file_id}')
+        # Retrieve file info from session
+        file_info = session.get(f'insights_file_{file_id}')
+        if not file_info:
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        # Handle both old format (string) and new format (dict)
+        if isinstance(file_info, str):
+            file_path = file_info
+        else:
+            file_path = file_info.get('path')
+
+        level = int(data.get('level', 1))
+        if level not in [1, 2, 3]:
+            return jsonify({'error': 'Invalid level. Must be 1, 2, or 3.'}), 400
+
         if not file_path or not os.path.exists(file_path):
             return jsonify({'error': 'File not found. Please upload again.'}), 404
 
-        # Prepare data
-        result = prepare_data_for_insights(file_path)
+        # Prepare data at the same level
+        result = prepare_data_for_insights(file_path, level=level)
         df_exploded = result['df_exploded']
 
-        # Perform analysis
+        # Perform analysis with level for universal mean calculation
         analysis_result = analyze_imdrf_insights(
             df_exploded,
             prefix,
             manufacturers,
             grain,
-            threshold_k
+            threshold_k,
+            level=level
         )
 
         # Convert pandas data to JSON-serializable format
@@ -484,10 +718,85 @@ def api_analyze_insights():
             'date_range': analysis_result['date_range'].strftime('%Y-%m-%d').tolist() if len(analysis_result['date_range']) > 0 else [],
             'statistics': analysis_result['statistics'],
             'grain': grain,
-            'selected_prefix': prefix
+            'selected_prefix': prefix,
+            'level': level,
+            'level_label': analysis_result.get('level_label', f'Level-{level}')
         }
 
         return jsonify(response_data), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/imdrf-insights/annex-status', methods=['GET'])
+@login_required
+def api_annex_status():
+    """Get the status of the IMDRF Annex file loading."""
+    try:
+        status = get_annex_status()
+        return jsonify({
+            'success': True,
+            'annex_status': status
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/imdrf-insights/download-code-counts-xlsx', methods=['GET'])
+@login_required
+def api_download_code_counts_xlsx():
+    """Download IMDRF code counts for all levels as an XLSX file."""
+    file_id = request.args.get('file_id')
+
+    if not file_id:
+        return jsonify({'error': 'Missing file_id parameter'}), 400
+
+    try:
+        file_info = session.get(f'insights_file_{file_id}')
+        if not file_info:
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        if isinstance(file_info, str):
+            file_path = file_info
+        else:
+            file_path = file_info.get('path')
+
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        counts_by_level = get_imdrf_code_counts_all_levels(file_path)
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "IMDRF Code Counts"
+
+        bold_font = Font(bold=True)
+
+        for level in [1, 2, 3]:
+            level_label = f"Level-{level} Codes"
+            ws.append([level_label, ""])
+            ws.cell(row=ws.max_row, column=1).font = bold_font
+
+            level_counts = counts_by_level.get(level, {})
+            for code in sorted(level_counts.keys()):
+                ws.append([code, level_counts.get(code, 0)])
+
+            ws.append(["", ""])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name='imdrf_code_counts_all_levels.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400

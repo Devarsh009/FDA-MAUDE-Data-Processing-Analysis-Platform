@@ -12,7 +12,7 @@ except ImportError:
 
 # Groq API Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-70b-versatile"  # Using Groq's fast model
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Using Groq's latest model
 
 # Schema Definition (Phase 0 - Schema Freeze)
 COLUMNS_TO_DELETE = [

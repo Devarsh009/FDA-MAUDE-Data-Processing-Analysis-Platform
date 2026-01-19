@@ -1,17 +1,26 @@
 """
 Manufacturer normalization with deterministic cleanup and web-verified canonicalization.
 NON-NEGOTIABLE: Modify ONLY existing Manufacturer column in place. No new columns. No guessing.
+
+Scalability Features:
+- Deterministic-only mode for large datasets (skip web verification)
+- Batch processing support
+- Aggressive caching to avoid repeated lookups
 """
 import json
 import os
 import re
 import time
 from datetime import datetime
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Callable
 from backend.groq_client import GroqClient
 import requests
 from urllib.parse import urlparse, quote
 from bs4 import BeautifulSoup
+
+
+# Threshold for deterministic-only mode (unique manufacturers)
+LARGE_MANUFACTURER_THRESHOLD = 100
 
 
 class ManufacturerNormalizer:
@@ -419,7 +428,7 @@ Return format (STRICT JSON only):
             return cleaned
         
         verified, sources = self._verify_relationship(cleaned, canonical_proposed, search_queries)
-        
+
         if verified and sources:
             # Update canonical map and sources map
             self.canonical_map[cleaned] = canonical_proposed
@@ -437,3 +446,90 @@ Return format (STRICT JSON only):
             self._save_json(self.nochange_map_file, self.nochange_map)
             self._save_json(self.canonical_map_file, self.canonical_map)
             return cleaned
+
+    def normalize_deterministic_only(self, manufacturer_name: str) -> str:
+        """
+        Fast deterministic-only normalization (no web lookups, no Groq calls).
+        Used for large datasets where web verification would be too slow.
+
+        Args:
+            manufacturer_name: Raw manufacturer name
+
+        Returns:
+            Cleaned manufacturer name (deterministic cleanup only)
+        """
+        if not manufacturer_name or str(manufacturer_name).strip().lower() in ['nan', '', 'none', 'null']:
+            return ""
+
+        # Step 1: Deterministic cleanup (always applied)
+        cleaned = self._deterministic_clean(manufacturer_name)
+        if not cleaned:
+            return ""
+
+        # Step 2: Check canonical map (use cached results if available)
+        if cleaned in self.canonical_map:
+            canonical = self.canonical_map[cleaned]
+            if canonical and canonical.strip():
+                return canonical
+
+        # Step 3: Return deterministic cleaned name (skip Groq and web verification)
+        return cleaned
+
+    def normalize_batch(
+        self,
+        manufacturer_names: List[str],
+        deterministic_only: bool = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> Dict[str, str]:
+        """
+        Batch normalize multiple manufacturer names efficiently.
+
+        Automatically uses deterministic-only mode for large datasets.
+
+        Args:
+            manufacturer_names: List of manufacturer names to normalize
+            deterministic_only: Force deterministic-only mode. If None, auto-detect.
+            progress_callback: Optional callback(current, total, message) for progress
+
+        Returns:
+            Dictionary mapping original name -> normalized name
+        """
+        results = {}
+
+        # Get unique names
+        unique_names = set()
+        for name in manufacturer_names:
+            if name and str(name).strip().lower() not in ['nan', '', 'none', 'null']:
+                unique_names.add(str(name).strip())
+
+        total_unique = len(unique_names)
+
+        # Auto-detect mode based on dataset size
+        if deterministic_only is None:
+            deterministic_only = total_unique >= LARGE_MANUFACTURER_THRESHOLD
+            if deterministic_only and progress_callback:
+                progress_callback(0, total_unique,
+                    f"Large dataset ({total_unique} unique names). Using FAST deterministic-only mode.")
+
+        if progress_callback:
+            progress_callback(0, total_unique, f"Normalizing {total_unique} unique manufacturer names...")
+
+        processed = 0
+        for name in unique_names:
+            if deterministic_only:
+                results[name] = self.normalize_deterministic_only(name)
+            else:
+                results[name] = self.normalize(name)
+
+            processed += 1
+            if progress_callback and (processed % 500 == 0 or processed == total_unique):
+                progress_callback(processed, total_unique, f"Normalized {processed}/{total_unique} names")
+
+        # Save cache after batch processing
+        self._save_json(self.canonical_map_file, self.canonical_map)
+        self._save_json(self.nochange_map_file, self.nochange_map)
+
+        if progress_callback:
+            progress_callback(total_unique, total_unique, "Manufacturer normalization complete!")
+
+        return results

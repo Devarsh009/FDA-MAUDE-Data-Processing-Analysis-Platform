@@ -2,7 +2,14 @@
 Main processing pipeline for MAUDE data cleaning and enrichment.
 Implements all phases: ingestion, cleaning, standardization, and enrichment.
 Deterministic and audit-defensible.
+
+Scalability Features:
+- Chunked file reading for large CSV files (>50MB)
+- Memory optimization using category dtype for low-cardinality columns
+- Batch IMDRF mapping (processes unique problems once, not per-row)
+- Deterministic-only mode for files with 1000+ rows (fast processing)
 """
+import os
 import pandas as pd
 import re
 from datetime import datetime
@@ -112,8 +119,21 @@ class MAUDEProcessor:
         }
     
     def _ingest_file(self, file_path: str) -> pd.DataFrame:
-        """Phase 1: Safe file ingestion with encoding detection and file type detection."""
+        """
+        Phase 1: Safe file ingestion with encoding detection and file type detection.
+
+        Memory optimizations for large files:
+        - Uses category dtype for low-cardinality columns
+        - Processes in chunks for very large CSV files
+        - Garbage collection after loading
+        """
+        import gc
+
         try:
+            # Get file size for optimization decisions
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            print(f"Ingesting file: {file_path} ({file_size_mb:.1f} MB)")
+
             # Detect file type by reading first few bytes (more reliable than extension)
             is_excel = False
             with open(file_path, 'rb') as f:
@@ -126,7 +146,7 @@ class MAUDEProcessor:
                 elif file_path.endswith('.xlsx') or file_path.endswith('.xls'):
                     # Trust extension if header check is ambiguous
                     is_excel = True
-            
+
             if is_excel:
                 # Read as strings to avoid Excel auto-parsing
                 # index_col=None prevents pandas from creating an index column
@@ -142,16 +162,41 @@ class MAUDEProcessor:
                 encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'windows-1252', 'utf-16']
                 df = None
                 last_error = None
-                
+
+                # For large CSV files (>50MB), use chunked reading
+                use_chunked = file_size_mb > 50
+
                 for encoding in encodings:
                     try:
-                        # index_col=False prevents pandas from using first column as index
-                        # Try with on_bad_lines parameter (pandas >= 1.3.0)
-                        try:
-                            df = pd.read_csv(file_path, dtype=str, encoding=encoding, low_memory=False, index_col=False, on_bad_lines='skip')
-                        except TypeError:
-                            # Fallback for older pandas versions
-                            df = pd.read_csv(file_path, dtype=str, encoding=encoding, low_memory=False, index_col=False, error_bad_lines=False)
+                        if use_chunked:
+                            # Read in chunks to reduce peak memory
+                            print(f"  Using chunked reading for large file...")
+                            chunks = []
+                            try:
+                                chunk_iter = pd.read_csv(
+                                    file_path, dtype=str, encoding=encoding,
+                                    chunksize=10000, index_col=False, on_bad_lines='skip'
+                                )
+                            except TypeError:
+                                chunk_iter = pd.read_csv(
+                                    file_path, dtype=str, encoding=encoding,
+                                    chunksize=10000, index_col=False, error_bad_lines=False
+                                )
+
+                            for i, chunk in enumerate(chunk_iter):
+                                chunks.append(chunk)
+                                if (i + 1) % 10 == 0:
+                                    print(f"    Read {(i+1) * 10000} rows...")
+
+                            df = pd.concat(chunks, ignore_index=True)
+                            del chunks
+                            gc.collect()
+                        else:
+                            # Standard reading for smaller files
+                            try:
+                                df = pd.read_csv(file_path, dtype=str, encoding=encoding, low_memory=False, index_col=False, on_bad_lines='skip')
+                            except TypeError:
+                                df = pd.read_csv(file_path, dtype=str, encoding=encoding, low_memory=False, index_col=False, error_bad_lines=False)
                         break  # Success, exit loop
                     except (UnicodeDecodeError, UnicodeError) as e:
                         last_error = e
@@ -160,19 +205,30 @@ class MAUDEProcessor:
                         # Other errors (not encoding-related), try next encoding
                         last_error = e
                         continue
-                
+
                 if df is None:
                     raise ValueError(f"Failed to read CSV file with any encoding. Last error: {last_error}")
-            
+
             # Remove any "Unnamed" columns (usually from index columns)
             df = df.loc[:, ~df.columns.str.contains('^Unnamed', case=False, na=False)]
-            
+
             # Ensure all columns are strings
             for col in df.columns:
                 df[col] = df[col].astype(str)
-            
+
+            # Memory optimization: convert low-cardinality columns to category dtype
+            if len(df) > 1000:
+                for col in df.columns:
+                    # Check cardinality
+                    nunique = df[col].nunique()
+                    if nunique < len(df) * 0.1:  # Less than 10% unique values
+                        df[col] = df[col].astype('category')
+
+            print(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
+            gc.collect()
+
             return df
-            
+
         except Exception as e:
             raise ValueError(f"Failed to ingest file: {e}")
     
@@ -501,17 +557,22 @@ class MAUDEProcessor:
     def _map_imdrf_codes(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Phase 6: IMDRF code mapping (Deterministic primary + Groq fallback, Annex-controlled).
+
+        Uses scalable batch processing for large files:
+        - Files with 1000+ rows automatically use deterministic-only mode
+        - Unique device problems are collected and processed once (not per-row)
+        - Results are cached for efficiency
         """
         device_problem_col = self.column_map.get("device_problem")
-        
+
         if device_problem_col is None:
             raise RuntimeError("HARD STOP: Device Problem column missing; cannot place IMDRF Code adjacent.")
-        
+
         if device_problem_col not in df.columns:
             raise RuntimeError(f"HARD STOP: Device Problem column '{device_problem_col}' not found in dataframe.")
-        
+
         print(f"Found Device Problem column: '{device_problem_col}' at position {df.columns.get_loc(device_problem_col)}")
-        
+
         # Check if IMDRF mapper has loaded Annex
         total_codes = len(self.imdrf_mapper.level1_map) + len(self.imdrf_mapper.level2_map) + len(self.imdrf_mapper.level3_map)
         if total_codes == 0:
@@ -524,7 +585,7 @@ class MAUDEProcessor:
                 df = df.reindex(columns=cols)
                 df['IMDRF Code'] = ""
             return df
-        
+
         # Ensure IMDRF Code exists and is adjacent (insert only if missing)
         if 'IMDRF Code' not in df.columns:
             cols = list(df.columns)
@@ -537,12 +598,34 @@ class MAUDEProcessor:
             cols = list(df.columns)
             if cols.index('IMDRF Code') != cols.index(device_problem_col) + 1:
                 raise RuntimeError("HARD STOP: IMDRF Code is not immediately right of Device Problem.")
-        
-        # Apply mapping (deterministic + Groq fallback)
-        print(f"Applying IMDRF mapping to {len(df)} rows...")
-        df['IMDRF Code'] = df[device_problem_col].apply(
-            lambda v: self.imdrf_mapper.map_device_problem_cell_to_codes(v)
+
+        # Determine processing mode based on file size
+        row_count = len(df)
+        from backend.imdrf_mapper import LARGE_FILE_THRESHOLD
+
+        print(f"Mapping IMDRF codes for {row_count} rows...")
+
+        # Progress callback for console output
+        def progress_callback(current, total, message):
+            if current == 0 or current == total or current % 500 == 0:
+                print(f"  [{current}/{total}] {message}")
+
+        # Determine if we should use deterministic-only mode
+        deterministic_only = row_count >= LARGE_FILE_THRESHOLD
+        if deterministic_only:
+            print(f"  Large file detected ({row_count} rows >= {LARGE_FILE_THRESHOLD}). Using FAST deterministic-only mode.")
+            print(f"  Note: AI-assisted mapping disabled for performance. Some codes may be unmapped.")
+
+        # Batch map unique device problems once
+        device_problems = df[device_problem_col].tolist()
+        mapping = self.imdrf_mapper.map_device_problems_batch(
+            device_problems,
+            deterministic_only=deterministic_only,
+            progress_callback=progress_callback
         )
+
+        # Explode rows so each device problem part becomes its own row
+        df = self._explode_device_problem_rows(df, device_problem_col, mapping)
         
         # Validate all nonblank codes exist in Annex (handle multiple codes separated by ' | ')
         nonblank_cells = df[df['IMDRF Code'].notna() & (df['IMDRF Code'].astype(str).str.strip() != '')]['IMDRF Code'].unique()
@@ -570,6 +653,33 @@ class MAUDEProcessor:
         print(f"SUCCESS: IMDRF Code at position {final_imdrf_idx}, immediately after Device Problem at {final_dp_idx}")
         
         return df
+
+    def _explode_device_problem_rows(self, df: pd.DataFrame, device_problem_col: str, mapping: Dict[str, str]) -> pd.DataFrame:
+        """
+        Expand rows so each semicolon-separated device problem becomes its own row
+        with the mapped IMDRF Code beside it, while preserving all other columns.
+        """
+        expanded_rows = []
+
+        for _, row in df.iterrows():
+            raw = row.get(device_problem_col, "")
+            raw_str = "" if raw is None else str(raw)
+            parts = [p.strip() for p in raw_str.split(";") if p.strip()]
+
+            if not parts:
+                new_row = row.to_dict()
+                new_row[device_problem_col] = raw_str.strip()
+                new_row['IMDRF Code'] = ""
+                expanded_rows.append(new_row)
+                continue
+
+            for part in parts:
+                new_row = row.to_dict()
+                new_row[device_problem_col] = part
+                new_row['IMDRF Code'] = mapping.get(part, "")
+                expanded_rows.append(new_row)
+
+        return pd.DataFrame(expanded_rows, columns=df.columns)
     
     def _validate_output(self, df: pd.DataFrame, original_col_count: int) -> Dict[str, any]:
         """Phase 7: Final validation checks (HARD STOPS)."""
