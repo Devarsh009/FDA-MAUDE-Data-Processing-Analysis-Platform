@@ -106,6 +106,9 @@ class MAUDEProcessor:
         # Phase 7: Final Validation
         validation_results = self._validate_output(df, original_cols)
         
+        # Phase 7.5: Sanitize for Excel output (remove illegal characters)
+        df = self._sanitize_for_excel(df)
+
         # Save output
         df.to_excel(output_path, index=False, engine='openpyxl')
         
@@ -117,6 +120,30 @@ class MAUDEProcessor:
             'rows_removed': original_rows - len(df),
             'validation': validation_results
         }
+
+    def _sanitize_for_excel(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Remove illegal characters that Excel worksheets cannot accept.
+        This prevents openpyxl IllegalCharacterError during export.
+        """
+        try:
+            from openpyxl.utils.cell import ILLEGAL_CHARACTERS_RE
+        except Exception:
+            ILLEGAL_CHARACTERS_RE = None
+
+        def _clean_value(value):
+            if value is None:
+                return value
+            text = str(value)
+            if ILLEGAL_CHARACTERS_RE is not None:
+                return ILLEGAL_CHARACTERS_RE.sub('', text)
+            # Fallback: strip control chars except tab/newline/carriage return
+            return ''.join(ch for ch in text if ch in ('\t', '\n', '\r') or ord(ch) >= 32)
+
+        cleaned = df.copy()
+        for col in cleaned.columns:
+            cleaned[col] = cleaned[col].map(_clean_value)
+        return cleaned
     
     def _ingest_file(self, file_path: str) -> pd.DataFrame:
         """
