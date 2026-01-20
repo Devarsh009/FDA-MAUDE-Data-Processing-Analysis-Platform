@@ -944,6 +944,7 @@
             updateProgress(10);
             
             const formData = new FormData(form);
+            formData.append('async', '1');
             
             try {
                 updateProgress(30);
@@ -961,7 +962,64 @@
                                    contentType.includes('excel') || 
                                    contentType.includes('openxmlformats');
                 
-                if (response.ok && isExcelFile) {
+                if (response.status === 202) {
+                    const payload = await response.json();
+                    const statusUrl = payload.status_url;
+                    const downloadUrl = payload.download_url;
+
+                    showStatus('Processing started. This may take several minutes...', 'info');
+
+                    const pollInterval = 3000;
+                    const maxAttempts = 200;
+                    let attempts = 0;
+
+                    const poll = async () => {
+                        attempts += 1;
+                        try {
+                            const statusResp = await fetch(statusUrl);
+                            const statusData = await statusResp.json();
+                            if (statusData.status === 'done') {
+                                showStatus('Processing complete. Downloading...', 'success');
+                                const fileResp = await fetch(downloadUrl);
+                                const blob = await fileResp.blob();
+                                const url = window.URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                const filename = `cleaned_${fileInput.files[0]?.name?.split('.')[0] || 'output'}.xlsx`;
+                                a.href = url;
+                                a.download = filename;
+                                document.body.appendChild(a);
+                                a.click();
+                                window.URL.revokeObjectURL(url);
+                                document.body.removeChild(a);
+                                updateProgress(100);
+                                setTimeout(() => {
+                                    updateProgress(0);
+                                    progressBar.classList.remove('show');
+                                }, 2000);
+                                return;
+                            }
+                            if (statusData.status === 'failed') {
+                                showStatus(`Error: ${statusData.error || 'Processing failed'}`, 'error');
+                                updateProgress(0);
+                                progressBar.classList.remove('show');
+                                return;
+                            }
+                            if (attempts < maxAttempts) {
+                                setTimeout(poll, pollInterval);
+                            } else {
+                                showStatus('Error: Processing is taking too long. Please try again.', 'error');
+                                updateProgress(0);
+                                progressBar.classList.remove('show');
+                            }
+                        } catch (error) {
+                            showStatus(`Error: ${error.message}`, 'error');
+                            updateProgress(0);
+                            progressBar.classList.remove('show');
+                        }
+                    };
+
+                    setTimeout(poll, pollInterval);
+                } else if (response.ok && isExcelFile) {
                     updateProgress(90);
                     
                     // Get filename from Content-Disposition header

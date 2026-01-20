@@ -6,6 +6,8 @@ import json
 import csv
 import re
 import time
+import threading
+import uuid
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import requests
@@ -49,6 +51,10 @@ else:
     app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'maude_uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# In-memory job store for async processing
+PROCESS_JOBS = {}
+PROCESS_JOBS_LOCK = threading.Lock()
+
 # Flask-Mail configuration
 app.config['MAIL_SERVER'] = MAIL_SERVER
 app.config['MAIL_PORT'] = MAIL_PORT
@@ -83,6 +89,93 @@ def load_user(user_id):
 def allowed_file(filename):
     """Check if file extension is allowed."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _set_job_status(job_id, **updates):
+    with PROCESS_JOBS_LOCK:
+        PROCESS_JOBS.setdefault(job_id, {}).update(updates)
+
+
+def _get_job(job_id):
+    with PROCESS_JOBS_LOCK:
+        return PROCESS_JOBS.get(job_id)
+
+
+def _run_processing_job(job_id, input_path, output_path, output_filename, imdrf_path, user_id):
+    _set_job_status(job_id, status='running')
+    try:
+        processor = MAUDEProcessor()
+
+        if imdrf_path and os.path.exists(imdrf_path):
+            processor.load_imdrf_structure(imdrf_path)
+
+        stats = processor.process_file(input_path, output_path)
+
+        critical_failures = []
+        if not stats['validation'].get('column_count_correct', False):
+            critical_failures.append('Column count check failed')
+        if not stats['validation'].get('file_will_open', False):
+            critical_failures.append('File integrity check failed')
+        if not stats['validation'].get('date_format_correct', False):
+            critical_failures.append('Date format check failed (HARD STOP: no literal "nan", all dates must be DD-MM-YYYY)')
+        if not stats['validation'].get('imdrf_adjacent', False):
+            critical_failures.append('IMDRF Code column position check failed (HARD STOP: must be adjacent to Device Problem)')
+        if not stats['validation'].get('imdrf_codes_valid', False):
+            critical_failures.append('IMDRF codes validation failed (HARD STOP: all codes must exist in Annex)')
+
+        warnings = []
+        if not stats['validation'].get('no_timestamps', False):
+            warnings.append('Timestamp check failed (non-critical)')
+
+        if critical_failures:
+            error_msg = f"Validation failed (HARD STOP): {', '.join(critical_failures)}"
+            if warnings:
+                error_msg += f" | Warnings: {', '.join(warnings)}"
+            _set_job_status(job_id, status='failed', error=error_msg)
+            return
+
+        _set_job_status(
+            job_id,
+            status='done',
+            output_path=output_path,
+            output_filename=output_filename,
+            user_id=user_id
+        )
+    except Exception as e:
+        try:
+            app.logger.exception("Processing failed")
+        except Exception:
+            pass
+        _set_job_status(job_id, status='failed', error=f"Processing failed: {str(e)}")
+
+
+@app.route('/process/status/<job_id>', methods=['GET'])
+@login_required
+def process_status(job_id):
+    job = _get_job(job_id)
+    if not job or job.get('user_id') != current_user.id:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify({'status': job.get('status'), 'error': job.get('error')}), 200
+
+
+@app.route('/process/download/<job_id>', methods=['GET'])
+@login_required
+def process_download(job_id):
+    job = _get_job(job_id)
+    if not job or job.get('user_id') != current_user.id:
+        return jsonify({'error': 'Job not found'}), 404
+    if job.get('status') != 'done':
+        return jsonify({'error': 'Job not completed'}), 400
+    output_path = job.get('output_path')
+    output_filename = job.get('output_filename')
+    if not output_path or not os.path.exists(output_path):
+        return jsonify({'error': 'Output file not found'}), 404
+    return send_file(
+        output_path,
+        as_attachment=True,
+        download_name=output_filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 
 @app.route('/api/imdrf-counts/download-xlsx', methods=['POST'])
@@ -427,31 +520,45 @@ def process_file():
     try:
         # Save uploaded file
         filename = secure_filename(file.filename)
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file_id = f"{current_user.id}_{os.urandom(8).hex()}"
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
         file.save(input_path)
         
         # Create output file path
         output_filename = f"cleaned_{filename.rsplit('.', 1)[0]}.xlsx"
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
         
-        # Initialize processor
-        processor = MAUDEProcessor()
-        
-        # Load IMDRF structure if provided
-        imdrf_loaded = False
+        imdrf_path = None
         if 'imdrf_file' in request.files:
             imdrf_file = request.files['imdrf_file']
             if imdrf_file.filename and imdrf_file.filename.strip():
                 imdrf_path = os.path.join(app.config['UPLOAD_FOLDER'], f"imdrf_{secure_filename(imdrf_file.filename)}")
                 imdrf_file.save(imdrf_path)
-                processor.load_imdrf_structure(imdrf_path)
-                imdrf_loaded = True
-                print(f"IMDRF annex file loaded from: {imdrf_file.filename}")
-        
-        if not imdrf_loaded:
+
+        async_requested = request.form.get('async') == '1'
+        if async_requested:
+            job_id = str(uuid.uuid4())
+            _set_job_status(job_id, status='queued', user_id=current_user.id)
+            thread = threading.Thread(
+                target=_run_processing_job,
+                args=(job_id, input_path, output_path, output_filename, imdrf_path, current_user.id),
+                daemon=True
+            )
+            thread.start()
+            return jsonify({
+                'job_id': job_id,
+                'status_url': url_for('process_status', job_id=job_id),
+                'download_url': url_for('process_download', job_id=job_id)
+            }), 202
+
+        # Sync processing (fallback)
+        processor = MAUDEProcessor()
+
+        if imdrf_path and os.path.exists(imdrf_path):
+            processor.load_imdrf_structure(imdrf_path)
+        else:
             print("WARNING: No IMDRF annex file provided. IMDRF codes will be blank.")
-        
-        # Process file
+
         stats = processor.process_file(input_path, output_path)
         
         # Check validation - HARD STOPS for critical failures
