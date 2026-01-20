@@ -109,8 +109,12 @@ class MAUDEProcessor:
         # Phase 7.5: Sanitize for Excel output (remove illegal characters)
         df = self._sanitize_for_excel(df)
 
-        # Save output
-        df.to_excel(output_path, index=False, engine='openpyxl')
+        # Save output (prefer faster xlsxwriter if available)
+        try:
+            import xlsxwriter  # noqa: F401
+            df.to_excel(output_path, index=False, engine='xlsxwriter')
+        except Exception:
+            df.to_excel(output_path, index=False, engine='openpyxl')
         
         return {
             'original_rows': original_rows,
