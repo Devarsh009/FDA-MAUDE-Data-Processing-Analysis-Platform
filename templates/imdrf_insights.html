@@ -597,6 +597,48 @@
                     </table>
                 </div>
             </div>
+
+            <div class="bulk-download-section" style="margin-top: 40px;">
+                <h2 class="section-title">
+                    <i class="fas fa-download"></i>
+                    Bulk MAUDE Download (All Records)
+                </h2>
+                <p style="color: var(--text-secondary); margin-bottom: 18px;">
+                    Fetch all MAUDE records for a product code and date range using the openFDA API. Large exports can take several minutes.
+                </p>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 16px;">
+                    <div class="form-group">
+                        <label for="bulkProductCode">
+                            <i class="fas fa-barcode"></i> Product Code
+                        </label>
+                        <input type="text" id="bulkProductCode" placeholder="e.g., ABC" style="width: 100%; padding: 12px; border: 2px solid var(--border); border-radius: 8px; font-size: 0.95rem;">
+                    </div>
+                    <div class="form-group">
+                        <label for="bulkDateFrom">
+                            <i class="fas fa-calendar"></i> Date From
+                        </label>
+                        <input type="date" id="bulkDateFrom" style="width: 100%; padding: 12px; border: 2px solid var(--border); border-radius: 8px; font-size: 0.95rem;">
+                    </div>
+                    <div class="form-group">
+                        <label for="bulkDateTo">
+                            <i class="fas fa-calendar"></i> Date To
+                        </label>
+                        <input type="date" id="bulkDateTo" style="width: 100%; padding: 12px; border: 2px solid var(--border); border-radius: 8px; font-size: 0.95rem;">
+                    </div>
+                    <div class="form-group">
+                        <label for="bulkFormat">
+                            <i class="fas fa-file-csv"></i> Format
+                        </label>
+                        <select id="bulkFormat">
+                            <option value="csv" selected>CSV</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="analyze-btn show" id="bulkDownloadBtn" style="margin-top: 6px;">
+                    <i class="fas fa-cloud-download-alt"></i> Download All Records
+                </button>
+                <div id="bulkDownloadStatus" class="status" style="margin-top: 16px;"></div>
+            </div>
         </div>
     </div>
 
@@ -626,6 +668,12 @@
         const status = document.getElementById('status');
         const resultsSection = document.getElementById('resultsSection');
         const levelRadios = document.querySelectorAll('input[name="imdrfLevel"]');
+        const bulkProductCode = document.getElementById('bulkProductCode');
+        const bulkDateFrom = document.getElementById('bulkDateFrom');
+        const bulkDateTo = document.getElementById('bulkDateTo');
+        const bulkFormat = document.getElementById('bulkFormat');
+        const bulkDownloadBtn = document.getElementById('bulkDownloadBtn');
+        const bulkDownloadStatus = document.getElementById('bulkDownloadStatus');
 
         // Level label mappings
         const levelLabels = {
@@ -682,6 +730,15 @@
 
         function hideStatus() {
             status.className = 'status';
+        }
+
+        function showBulkStatus(message, type) {
+            bulkDownloadStatus.textContent = message;
+            bulkDownloadStatus.className = `status ${type} show`;
+        }
+
+        function hideBulkStatus() {
+            bulkDownloadStatus.className = 'status';
         }
 
         async function refreshPreparedData(level) {
@@ -920,6 +977,73 @@
             } finally {
                 analyzeBtn.disabled = false;
                 analyzeBtn.innerHTML = '<i class="fas fa-chart-bar"></i> Analyze Trends';
+            }
+        });
+
+        bulkDownloadBtn.addEventListener('click', async () => {
+            const productCode = bulkProductCode.value.trim();
+            const fromDate = bulkDateFrom.value;
+            const toDate = bulkDateTo.value;
+            const format = bulkFormat.value || 'csv';
+
+            if (!productCode || !fromDate || !toDate) {
+                showBulkStatus('❌ Please provide product code, date from, and date to.', 'error');
+                return;
+            }
+
+            bulkDownloadBtn.disabled = true;
+            bulkDownloadBtn.innerHTML = '<span class="spinner"></span> Preparing download...';
+            showBulkStatus('Fetching records from openFDA. This may take a while...', 'info');
+
+            try {
+                const response = await fetch('/api/maude/export', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        product_code: productCode,
+                        date_from: fromDate,
+                        date_to: toDate,
+                        format: format
+                    })
+                });
+
+                if (!response.ok) {
+                    let errorMessage = 'Download failed.';
+                    try {
+                        const errorData = await response.json();
+                        errorMessage = errorData.error || errorMessage;
+                    } catch (e) {
+                        errorMessage = 'Download failed.';
+                    }
+                    showBulkStatus(`❌ ${errorMessage}`, 'error');
+                    return;
+                }
+
+                const blob = await response.blob();
+                const contentDisposition = response.headers.get('Content-Disposition') || '';
+                let filename = 'maude_export.csv';
+                const match = contentDisposition.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(url);
+
+                showBulkStatus('✅ Download started. Check your downloads folder.', 'success');
+            } catch (error) {
+                showBulkStatus(`❌ ${error.message}`, 'error');
+            } finally {
+                bulkDownloadBtn.disabled = false;
+                bulkDownloadBtn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Download All Records';
             }
         });
 

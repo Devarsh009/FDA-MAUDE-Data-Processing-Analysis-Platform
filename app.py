@@ -4,7 +4,12 @@ Flask application for MAUDE data processing web interface with authentication.
 import os
 import json
 import csv
-from flask import Flask, request, render_template, send_file, jsonify, redirect, url_for, session
+import re
+import time
+from datetime import datetime
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+import requests
+from flask import Flask, request, render_template, send_file, jsonify, redirect, url_for, session, Response, stream_with_context
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
@@ -800,6 +805,429 @@ def api_download_code_counts_xlsx():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 400
+
+
+# MAUDE Bulk Export (openFDA)
+def _format_openfda_search_value(value: str) -> str:
+    """Format a value for openFDA search queries, quoting if needed."""
+    if re.fullmatch(r'[A-Za-z0-9]+', value):
+        return value
+    escaped = value.replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _parse_next_link(link_header: str) -> str:
+    if not link_header:
+        return None
+    match = re.search(r'<([^>]+)>\s*;\s*rel="next"', link_header)
+    return match.group(1) if match else None
+
+
+def _build_product_code_query(field_or_fields, code_value: str) -> str:
+    if isinstance(field_or_fields, (list, tuple)):
+        clauses = [f"{field}:{code_value}" for field in field_or_fields]
+        return f"({ ' OR '.join(clauses) })"
+    return f"{field_or_fields}:{code_value}"
+
+
+def _parse_openfda_date(value):
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    for fmt in ('%Y%m%d', '%Y-%m-%d', '%Y/%m/%d'):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _format_openfda_date(value):
+    parsed = _parse_openfda_date(value)
+    return parsed.isoformat() if parsed else (value or '')
+
+
+def _normalize_code_value(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    codes = []
+    for item in values:
+        text = _stringify_value(item).upper().strip()
+        if not text:
+            continue
+        codes.extend([c for c in re.split(r'[^A-Z0-9]+', text) if c])
+    return _unique_preserve_order(codes)
+
+
+def _record_has_product_code(record, code: str) -> bool:
+    code = (code or '').upper().strip()
+    if not code:
+        return False
+    devices = record.get('device') or []
+    candidates = []
+    for device in devices:
+        candidates.extend(_normalize_code_value(device.get('device_report_product_code')))
+        candidates.extend(_normalize_code_value(device.get('product_code')))
+        openfda = device.get('openfda') or {}
+        candidates.extend(_normalize_code_value(openfda.get('product_code')))
+    openfda_root = record.get('openfda') or {}
+    candidates.extend(_normalize_code_value(openfda_root.get('product_code')))
+    return code in set(candidates)
+
+
+def _record_in_date_range(record, start_date, end_date) -> bool:
+    value = record.get('date_received')
+    parsed = _parse_openfda_date(value)
+    if not parsed:
+        return False
+    return start_date <= parsed <= end_date
+
+
+def _get_mdr_text(record, text_type_code: str) -> str:
+    for item in record.get('mdr_text') or []:
+        if item.get('text_type_code') == text_type_code:
+            return item.get('text', '')
+    return ''
+
+
+def _ensure_api_key(url: str, api_key: str) -> str:
+    if not api_key:
+        return url
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    if 'api_key' not in query:
+        query['api_key'] = [api_key]
+        new_query = urlencode(query, doseq=True)
+        parsed = parsed._replace(query=new_query)
+        return urlunparse(parsed)
+    return url
+
+
+def _openfda_get(url: str, params: dict = None, max_retries: int = 4, timeout=(5, 30), allow_not_found: bool = False):
+    """GET with retries on 429/5xx and exponential backoff."""
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            if response.status_code == 404 and allow_not_found:
+                return response
+            if response.status_code in (429, 500, 502, 503, 504):
+                if attempt < max_retries:
+                    retry_after = response.headers.get('Retry-After')
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+            response.raise_for_status()
+            return response
+        except requests.RequestException:
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+
+def _normalize_to_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _stringify_value(value):
+    if value is None:
+        return ''
+    if isinstance(value, dict):
+        for key in ('device_problem_code', 'device_problem_text', 'code', 'text', 'value', 'description'):
+            if key in value:
+                return str(value.get(key) or '')
+        if len(value) == 1:
+            return str(next(iter(value.values())))
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _unique_preserve_order(values):
+    seen = set()
+    result = []
+    for value in values:
+        if value in seen or value == '':
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _collect_device_field(devices, field):
+    values = []
+    for device in devices:
+        for value in _normalize_to_list(device.get(field)):
+            values.append(_stringify_value(value))
+    return _unique_preserve_order(values)
+
+
+def _collect_device_openfda_field(devices, field):
+    values = []
+    for device in devices:
+        openfda = device.get('openfda') or {}
+        for value in _normalize_to_list(openfda.get(field)):
+            values.append(_stringify_value(value))
+    return _unique_preserve_order(values)
+
+
+@app.route('/api/maude/export', methods=['POST'])
+@login_required
+def api_maude_export():
+    data = request.get_json() or {}
+    product_code = (data.get('product_code') or '').strip().upper()
+    date_from = (data.get('date_from') or '').strip()
+    date_to = (data.get('date_to') or '').strip()
+    fmt = (data.get('format') or 'csv').strip().lower()
+
+    if not product_code:
+        return jsonify({'error': 'Product code is required.'}), 400
+
+    if fmt != 'csv':
+        return jsonify({'error': 'Only CSV format is supported at this time.'}), 400
+
+    try:
+        start_date = datetime.strptime(date_from, '%Y-%m-%d').date()
+        end_date = datetime.strptime(date_to, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
+
+    if start_date > end_date:
+        return jsonify({'error': 'Date From must be on or before Date To.'}), 400
+
+    start_openfda = start_date.strftime('%Y%m%d')
+    end_openfda = end_date.strftime('%Y%m%d')
+    normalized_code = product_code.upper()
+    candidates = [normalized_code]
+    if '-' in normalized_code:
+        candidates.append(normalized_code.replace('-', ''))
+    if ' ' in normalized_code:
+        candidates.append(normalized_code.replace(' ', ''))
+    candidates = [c for i, c in enumerate(candidates) if c and c not in candidates[:i]]
+
+    api_key = os.getenv('OPENFDA_API_KEY')
+    base_url = 'https://api.fda.gov/device/event.json'
+    limit = 1000
+    sort = 'date_received:asc'
+
+    search_fields = [
+        'device.device_report_product_code',
+        'device.openfda.product_code',
+        'openfda.product_code',
+        'device.product_code'
+    ]
+    selected_field = None
+    selected_code = None
+
+    for code_candidate in candidates:
+        search_value = _format_openfda_search_value(code_candidate)
+        for field in search_fields:
+            search = f'date_received:[{start_openfda} TO {end_openfda}] AND {field}:{search_value}'
+            params = {'search': search, 'limit': 1, 'sort': sort}
+            if api_key:
+                params['api_key'] = api_key
+            try:
+                response = _openfda_get(base_url, params=params, allow_not_found=True)
+                if response.status_code == 404:
+                    continue
+                data_probe = response.json()
+                if data_probe.get('results'):
+                    selected_field = field
+                    selected_code = code_candidate
+                    break
+            except Exception:
+                continue
+        if selected_field:
+            break
+
+    combined_fields = search_fields
+    if not selected_field:
+        for code_candidate in candidates:
+            search_value = _format_openfda_search_value(code_candidate)
+            combined_query = _build_product_code_query(combined_fields, search_value)
+            search = f'date_received:[{start_openfda} TO {end_openfda}] AND {combined_query}'
+            params = {'search': search, 'limit': 1, 'sort': sort}
+            if api_key:
+                params['api_key'] = api_key
+            try:
+                response = _openfda_get(base_url, params=params, allow_not_found=True)
+                if response.status_code == 404:
+                    continue
+                data_probe = response.json()
+                if data_probe.get('results'):
+                    selected_field = combined_fields
+                    selected_code = code_candidate
+                    break
+            except Exception:
+                continue
+
+    if not selected_field:
+        return jsonify({'error': 'No matching records found for the provided product code and date range. Please confirm the FDA 3-character product code and date range, then try again.'}), 404
+
+    if not selected_code:
+        selected_code = normalized_code
+    search_value = _format_openfda_search_value(selected_code)
+    product_query = _build_product_code_query(selected_field, search_value)
+    search = f'date_received:[{start_openfda} TO {end_openfda}] AND {product_query}'
+    params = {'search': search, 'limit': limit, 'sort': sort}
+    if api_key:
+        params['api_key'] = api_key
+
+    try:
+        first_response = _openfda_get(base_url, params=params, allow_not_found=True)
+        if first_response.status_code == 404:
+            return jsonify({'error': 'No matching records found for the provided product code and date range.'}), 404
+        first_payload = first_response.json()
+    except Exception as e:
+        return jsonify({'error': f'openFDA request failed: {str(e)}'}), 502
+
+    first_results = first_payload.get('results', [])
+    if not first_results:
+        return jsonify({'error': 'No matching records found for the provided product code and date range.'}), 404
+
+    next_url = _parse_next_link(first_response.headers.get('Link'))
+    if next_url:
+        next_url = _ensure_api_key(next_url, api_key)
+
+    columns = [
+        'Unnamed: 0',
+        'Web Address',
+        'Report Number',
+        'Event Date',
+        'Event Type',
+        'Manufacturer',
+        'Date Received',
+        'Product Code',
+        ' Brand Name',
+        ' Device Problem',
+        'Patient Problem',
+        'PMA/PMN Number',
+        'Exemption Number',
+        'Number of Events',
+        'Event Text'
+    ]
+
+    def build_row(record):
+        devices = record.get('device') or []
+
+        report_product_codes = _collect_device_field(devices, 'device_report_product_code')
+        device_product_codes = _collect_device_field(devices, 'product_code')
+        openfda_product_codes = _collect_device_openfda_field(devices, 'product_code')
+        brand_names = _unique_preserve_order(
+            _collect_device_field(devices, 'brand_name') + _collect_device_openfda_field(devices, 'brand_name')
+        )
+        pma_numbers = _collect_device_openfda_field(devices, 'pma_number')
+        k_numbers = _collect_device_openfda_field(devices, 'k_number')
+        exemption_numbers = _collect_device_openfda_field(devices, 'exemption_number')
+
+        device_problem_values = []
+        for value in _normalize_to_list(record.get('product_problems')):
+            device_problem_values.append(_stringify_value(value))
+        for value in _normalize_to_list(record.get('device_problem')):
+            device_problem_values.append(_stringify_value(value))
+        for device in devices:
+            for value in _normalize_to_list(device.get('device_problem')):
+                device_problem_values.append(_stringify_value(value))
+        device_problem_values = _unique_preserve_order([v.strip() for v in device_problem_values if v.strip()])
+
+        patient_problem_values = []
+        for value in _normalize_to_list(record.get('patient_problem_text')):
+            patient_problem_values.append(_stringify_value(value))
+        for patient in record.get('patient') or []:
+            for value in _normalize_to_list(patient.get('patient_problems')):
+                patient_problem_values.append(_stringify_value(value))
+        patient_problem_values = _unique_preserve_order([v.strip() for v in patient_problem_values if v.strip()])
+
+        report_number = record.get('report_number') or record.get('mdr_report_key') or ''
+        mdr_key = record.get('mdr_report_key') or ''
+        event_date = (
+            record.get('date_of_event')
+            or record.get('date_report')
+            or record.get('date_report_to_fda')
+            or record.get('date_received')
+        )
+        event_description = record.get('event_description', '') or _get_mdr_text(record, 'Description of Event or Problem')
+        if event_description and not str(event_description).strip().lower().startswith('event description:'):
+            event_description = f"Event Description: {event_description}"
+        product_code_value = selected_code or (report_product_codes[0] if report_product_codes else '')
+        pma_pmn_numbers = _unique_preserve_order(pma_numbers + k_numbers)
+
+        web_address = ''
+        if mdr_key:
+            web_address = f"https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfMAUDE/Detail.CFM?MDRFOI__ID={mdr_key}&pc={product_code_value}"
+
+        return {
+            'Unnamed: 0': '',
+            'Web Address': web_address,
+            'Report Number': report_number,
+            'Event Date': _format_openfda_date(event_date),
+            'Event Type': record.get('event_type', ''),
+            'Manufacturer': record.get('manufacturer_name', ''),
+            'Date Received': _format_openfda_date(record.get('date_received')),
+            'Product Code': product_code_value,
+            ' Brand Name': '; '.join(brand_names),
+            ' Device Problem': '; '.join(device_problem_values),
+            'Patient Problem': '; '.join(patient_problem_values),
+            'PMA/PMN Number': '; '.join(pma_pmn_numbers),
+            'Exemption Number': '; '.join(exemption_numbers),
+            'Number of Events': record.get('number_devices_in_event') or record.get('number_patients_in_event') or '1',
+            'Event Text': event_description
+        }
+
+    def generate_csv():
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=columns)
+        writer.writeheader()
+        yield output.getvalue().encode('utf-8')
+        output.seek(0)
+        output.truncate(0)
+
+        current_results = first_results
+        current_next = next_url
+
+        while True:
+            for record in current_results:
+                if not _record_in_date_range(record, start_date, end_date):
+                    continue
+                if not _record_has_product_code(record, selected_code):
+                    continue
+                writer.writerow(build_row(record))
+                yield output.getvalue().encode('utf-8')
+                output.seek(0)
+                output.truncate(0)
+
+            if not current_next:
+                break
+
+            try:
+                response = _openfda_get(current_next, params=None)
+                payload = response.json()
+            except Exception:
+                break
+
+            current_results = payload.get('results', [])
+            if not current_results:
+                break
+
+            current_next = _parse_next_link(response.headers.get('Link'))
+            if current_next:
+                current_next = _ensure_api_key(current_next, api_key)
+
+    safe_code = re.sub(r'[^A-Za-z0-9_-]+', '', product_code.upper()) or 'CODE'
+    filename = f"maude_{safe_code}_{date_from}_{date_to}.csv"
+
+    response = Response(stream_with_context(generate_csv()), mimetype='text/csv')
+    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
 
 
 # TXT to CSV Converter Routes

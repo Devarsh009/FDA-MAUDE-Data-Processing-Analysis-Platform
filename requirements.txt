@@ -19,5 +19,6 @@ openpyxl==3.0.9
 
 # These are small and required
 python-dateutil==2.8.2
+requests==2.31.0
 
 # Estimated total: ~170-190MB (should be under 250MB)
