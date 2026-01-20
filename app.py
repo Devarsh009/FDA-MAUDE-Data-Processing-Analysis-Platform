@@ -498,6 +498,12 @@ def process_file():
         )
         
     except Exception as e:
+        try:
+            import traceback
+            app.logger.exception("Processing failed")
+            traceback.print_exc()
+        except Exception:
+            pass
         return jsonify({'error': f'Processing failed: {str(e)}'}), 500
 
 
