@@ -8,6 +8,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: GUNICORN_CMD_ARGS
+        value: "--timeout 600 --workers 1"
       - key: SECRET_KEY
         generateValue: true
       - key: TEST_ACCOUNTS_ENABLED

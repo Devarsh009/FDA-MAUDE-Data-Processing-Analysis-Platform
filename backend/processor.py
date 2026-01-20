@@ -130,17 +130,21 @@ class MAUDEProcessor:
             from openpyxl.utils.cell import ILLEGAL_CHARACTERS_RE
         except Exception:
             ILLEGAL_CHARACTERS_RE = None
+        cleaned = df.copy()
 
+        if ILLEGAL_CHARACTERS_RE is not None:
+            for col in cleaned.columns:
+                if cleaned[col].dtype == object or str(cleaned[col].dtype) == 'string':
+                    cleaned[col] = cleaned[col].astype(str).str.replace(ILLEGAL_CHARACTERS_RE, '', regex=True)
+            return cleaned
+
+        # Fallback: strip control chars except tab/newline/carriage return (slower)
         def _clean_value(value):
             if value is None:
                 return value
             text = str(value)
-            if ILLEGAL_CHARACTERS_RE is not None:
-                return ILLEGAL_CHARACTERS_RE.sub('', text)
-            # Fallback: strip control chars except tab/newline/carriage return
             return ''.join(ch for ch in text if ch in ('\t', '\n', '\r') or ord(ch) >= 32)
 
-        cleaned = df.copy()
         for col in cleaned.columns:
             cleaned[col] = cleaned[col].map(_clean_value)
         return cleaned
