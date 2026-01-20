@@ -1261,6 +1261,11 @@ def api_maude_export():
         patient_problem_values = _unique_preserve_order([v.strip() for v in patient_problem_values if v.strip()])
 
         report_number = record.get('report_number') or record.get('mdr_report_key') or ''
+        manufacturer_name = record.get('manufacturer_name', '')
+        if not manufacturer_name:
+            manufacturer_candidates = _collect_device_field(devices, 'manufacturer_d_name')
+            if manufacturer_candidates:
+                manufacturer_name = '; '.join(manufacturer_candidates)
         mdr_key = record.get('mdr_report_key') or ''
         event_date = (
             record.get('date_of_event')
@@ -1284,7 +1289,7 @@ def api_maude_export():
             'Report Number': report_number,
             'Event Date': _format_openfda_date(event_date),
             'Event Type': record.get('event_type', ''),
-            'Manufacturer': record.get('manufacturer_name', ''),
+            'Manufacturer': manufacturer_name,
             'Date Received': _format_openfda_date(record.get('date_received')),
             'Product Code': product_code_value,
             ' Brand Name': '; '.join(brand_names),

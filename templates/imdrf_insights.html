@@ -732,6 +732,18 @@
             status.className = 'status';
         }
 
+        async function parseJsonResponse(response) {
+            const contentType = response.headers.get('Content-Type') || '';
+            if (contentType.includes('application/json')) {
+                return await response.json();
+            }
+            const text = await response.text();
+            if (text.includes('login') || text.includes('Login')) {
+                throw new Error('Session expired. Please log in again.');
+            }
+            throw new Error('Unexpected response from server. Please try again.');
+        }
+
         function showBulkStatus(message, type) {
             bulkDownloadStatus.textContent = message;
             bulkDownloadStatus.className = `status ${type} show`;
@@ -764,7 +776,7 @@
                     })
                 });
 
-                const data = await response.json();
+                const data = await parseJsonResponse(response);
 
                 if (response.ok) {
                     preparedData = data;
@@ -819,7 +831,7 @@
                     body: formData
                 });
 
-                const data = await response.json();
+                const data = await parseJsonResponse(response);
 
                 if (response.ok) {
                     preparedData = data;
@@ -887,7 +899,7 @@
             // Get top manufacturers for this prefix
             try {
                 const response = await fetch(`/api/imdrf-insights/top-manufacturers?prefix=${selectedPrefix}&file_id=${preparedData.file_id}&level=${currentLevel}`);
-                const data = await response.json();
+                const data = await parseJsonResponse(response);
 
                 if (response.ok) {
                     // Create checkboxes for all manufacturers, with top 5 pre-selected
@@ -932,7 +944,7 @@
                     analyzeBtn.classList.add('show');
                 }
             } catch (error) {
-                showStatus(`❌ Error loading manufacturers: ${error.message}`, 'error');
+                showStatus(`❌ ${error.message}`, 'error');
             }
         });
 
@@ -963,7 +975,7 @@
                     })
                 });
 
-                const data = await response.json();
+                const data = await parseJsonResponse(response);
 
                 if (response.ok) {
                     displayResults(data);
