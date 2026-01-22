@@ -932,8 +932,13 @@ def _format_openfda_search_value(value: str) -> str:
 def _parse_next_link(link_header: str) -> str:
     if not link_header:
         return None
-    match = re.search(r'<([^>]+)>\s*;\s*rel="next"', link_header)
-    return match.group(1) if match else None
+    parts = link_header.split(',')
+    for part in parts:
+        if re.search(r'rel\s*=\s*"?next"?', part, re.IGNORECASE):
+            match = re.search(r'<([^>]+)>', part)
+            if match:
+                return match.group(1)
+    return None
 
 
 def _build_product_code_query(field_or_fields, code_value: str) -> str:
@@ -1130,7 +1135,8 @@ def api_maude_export():
     api_key = os.getenv('OPENFDA_API_KEY')
     base_url = 'https://api.fda.gov/device/event.json'
     limit = 1000
-    sort = 'date_received:asc'
+    sort_field = 'mdr_report_key'
+    sort = f'{sort_field}:asc'
 
     search_fields = [
         'device.device_report_product_code',
@@ -1311,6 +1317,7 @@ def api_maude_export():
 
         current_results = first_results
         current_next = next_url
+        last_next = None
 
         while True:
             for record in current_results:
@@ -1324,6 +1331,25 @@ def api_maude_export():
                 output.truncate(0)
 
             if not current_next:
+                if len(current_results) == limit:
+                    last_record = current_results[-1]
+                    last_key = last_record.get(sort_field)
+                    if last_key:
+                        fallback_params = {
+                            'search': search,
+                            'limit': limit,
+                            'sort': sort,
+                            'search_after': last_key
+                        }
+                        if api_key:
+                            fallback_params['api_key'] = api_key
+                        current_next = requests.Request('GET', base_url, params=fallback_params).prepare().url
+                    else:
+                        break
+                else:
+                    break
+
+            if current_next == last_next:
                 break
 
             try:
@@ -1336,6 +1362,7 @@ def api_maude_export():
             if not current_results:
                 break
 
+            last_next = current_next
             current_next = _parse_next_link(response.headers.get('Link'))
             if current_next:
                 current_next = _ensure_api_key(current_next, api_key)
