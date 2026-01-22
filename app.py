@@ -50,10 +50,13 @@ elif os.getenv('TMP'):
 else:
     app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'maude_uploads')
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'jobs'), exist_ok=True)
 
 # In-memory job store for async processing
 PROCESS_JOBS = {}
 PROCESS_JOBS_LOCK = threading.Lock()
+MAUDE_EXPORT_JOBS = {}
+MAUDE_EXPORT_LOCK = threading.Lock()
 
 # Flask-Mail configuration
 app.config['MAIL_SERVER'] = MAIL_SERVER
@@ -93,12 +96,98 @@ def allowed_file(filename):
 
 def _set_job_status(job_id, **updates):
     with PROCESS_JOBS_LOCK:
-        PROCESS_JOBS.setdefault(job_id, {}).update(updates)
+        job = PROCESS_JOBS.setdefault(job_id, {})
+        job.update(updates)
+        _save_job_file('process', job_id, job)
 
 
 def _get_job(job_id):
     with PROCESS_JOBS_LOCK:
-        return PROCESS_JOBS.get(job_id)
+        job = PROCESS_JOBS.get(job_id)
+        if job:
+            return job
+    return _load_job_file('process', job_id)
+
+
+def _set_export_status(job_id, **updates):
+    with MAUDE_EXPORT_LOCK:
+        job = MAUDE_EXPORT_JOBS.setdefault(job_id, {})
+        if 'processed' in updates:
+            existing = job.get('processed') or 0
+            updates['processed'] = max(existing, updates.get('processed') or 0)
+        if 'scanned' in updates:
+            existing_scanned = job.get('scanned') or 0
+            updates['scanned'] = max(existing_scanned, updates.get('scanned') or 0)
+        job.update(updates)
+        _save_job_file('export', job_id, job)
+
+
+def _get_export_job(job_id):
+    with MAUDE_EXPORT_LOCK:
+        job = MAUDE_EXPORT_JOBS.get(job_id)
+        if job:
+            return job
+    return _load_job_file('export', job_id)
+
+
+def _job_file_path(prefix: str, job_id: str) -> str:
+    jobs_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'jobs')
+    return os.path.join(jobs_dir, f"{prefix}_{job_id}.json")
+
+
+def _save_job_file(prefix: str, job_id: str, payload: dict) -> None:
+    try:
+        path = _job_file_path(prefix, job_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except Exception:
+        pass
+
+
+def _load_job_file(prefix: str, job_id: str):
+    try:
+        path = _job_file_path(prefix, job_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+@app.route('/api/maude/export/status/<job_id>', methods=['GET'])
+@login_required
+def maude_export_status(job_id):
+    job = _get_export_job(job_id)
+    if not job or job.get('user_id') != current_user.id:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify({
+        'status': job.get('status'),
+        'error': job.get('error'),
+        'processed': job.get('processed'),
+        'total': job.get('total'),
+        'scanned': job.get('scanned')
+    }), 200
+
+
+@app.route('/api/maude/export/download/<job_id>', methods=['GET'])
+@login_required
+def maude_export_download(job_id):
+    job = _get_export_job(job_id)
+    if not job or job.get('user_id') != current_user.id:
+        return jsonify({'error': 'Job not found'}), 404
+    if job.get('status') != 'done':
+        return jsonify({'error': 'Job not completed'}), 400
+    output_path = job.get('output_path')
+    output_filename = job.get('output_filename')
+    if not output_path or not os.path.exists(output_path):
+        return jsonify({'error': 'Output file not found'}), 404
+    return send_file(
+        output_path,
+        as_attachment=True,
+        download_name=output_filename,
+        mimetype='text/csv'
+    )
 
 
 def _run_processing_job(job_id, input_path, output_path, output_filename, imdrf_path, user_id):
@@ -999,8 +1088,10 @@ def _record_has_product_code(record, code: str) -> bool:
     return code in set(candidates)
 
 
-def _record_in_date_range(record, start_date, end_date) -> bool:
-    value = record.get('date_received')
+def _record_in_date_range(record, start_date, end_date, date_field: str = None) -> bool:
+    value = record.get(date_field) if date_field else None
+    if not value:
+        value = record.get('date_received')
     parsed = _parse_openfda_date(value)
     if not parsed:
         return False
@@ -1027,12 +1118,14 @@ def _ensure_api_key(url: str, api_key: str) -> str:
     return url
 
 
-def _openfda_get(url: str, params: dict = None, max_retries: int = 4, timeout=(5, 30), allow_not_found: bool = False):
+def _openfda_get(url: str, params: dict = None, max_retries: int = 4, timeout=(5, 30), allow_not_found: bool = False, allow_bad_request: bool = False):
     """GET with retries on 429/5xx and exponential backoff."""
     for attempt in range(max_retries + 1):
         try:
             response = requests.get(url, params=params, timeout=timeout)
             if response.status_code == 404 and allow_not_found:
+                return response
+            if response.status_code == 400 and allow_bad_request:
                 return response
             if response.status_code in (429, 500, 502, 503, 504):
                 if attempt < max_retries:
@@ -1106,6 +1199,7 @@ def api_maude_export():
     date_from = (data.get('date_from') or '').strip()
     date_to = (data.get('date_to') or '').strip()
     fmt = (data.get('format') or 'csv').strip().lower()
+    async_requested = bool(data.get('async'))
 
     if not product_code:
         return jsonify({'error': 'Product code is required.'}), 400
@@ -1135,57 +1229,155 @@ def api_maude_export():
     api_key = os.getenv('OPENFDA_API_KEY')
     base_url = 'https://api.fda.gov/device/event.json'
     limit = 1000
-    sort_field = 'mdr_report_key'
+    sort_field = 'date_received'
     sort = f'{sort_field}:asc'
+    probe_fields = 'mdr_report_key'
+    export_fields = ','.join([
+        'report_number',
+        'mdr_report_key',
+        'date_received',
+        'date_report',
+        'date_of_event',
+        'event_type',
+        'manufacturer_name',
+        'device',
+        'mdr_text',
+        'product_problems',
+        'device_problem',
+        'patient_problem_text',
+        'patient',
+        'number_devices_in_event',
+        'number_patients_in_event'
+    ])
 
     search_fields = [
         'device.device_report_product_code',
+        'device.product_code',
         'device.openfda.product_code',
-        'openfda.product_code',
-        'device.product_code'
+        'openfda.product_code'
     ]
+    date_fields = ['date_received', 'date_report', 'date_of_event']
     selected_field = None
     selected_code = None
+    selected_date_field = None
+    rate_limited = False
 
-    for code_candidate in candidates:
-        search_value = _format_openfda_search_value(code_candidate)
-        for field in search_fields:
-            search = f'date_received:[{start_openfda} TO {end_openfda}] AND {field}:{search_value}'
-            params = {'search': search, 'limit': 1, 'sort': sort}
-            if api_key:
-                params['api_key'] = api_key
-            try:
-                response = _openfda_get(base_url, params=params, allow_not_found=True)
-                if response.status_code == 404:
-                    continue
-                data_probe = response.json()
-                if data_probe.get('results'):
-                    selected_field = field
-                    selected_code = code_candidate
+    # Primary probe: device.device_report_product_code + date_received
+    primary_search = f'date_received:[{start_openfda} TO {end_openfda}] AND device.device_report_product_code:{_format_openfda_search_value(normalized_code)}'
+    primary_params = {'search': primary_search, 'limit': 1, 'sort': sort, 'fields': probe_fields}
+    if api_key:
+        primary_params['api_key'] = api_key
+    try:
+        primary_resp = _openfda_get(base_url, params=primary_params, allow_not_found=True, allow_bad_request=True)
+        if primary_resp.status_code == 429:
+            rate_limited = True
+        elif primary_resp.status_code == 200:
+            primary_data = primary_resp.json()
+            if primary_data.get('results'):
+                selected_field = 'device.device_report_product_code'
+                selected_code = normalized_code
+                selected_date_field = 'date_received'
+    except Exception:
+        pass
+
+    if not selected_field:
+        for date_field in date_fields:
+            for code_candidate in candidates:
+                search_value = _format_openfda_search_value(code_candidate)
+                for field in search_fields:
+                    search = f'{date_field}:[{start_openfda} TO {end_openfda}] AND {field}:{search_value}'
+                    params = {'search': search, 'limit': 1, 'sort': sort, 'fields': probe_fields}
+                    if api_key:
+                        params['api_key'] = api_key
+                    try:
+                        response = _openfda_get(base_url, params=params, allow_not_found=True, allow_bad_request=True)
+                        if response.status_code == 429:
+                            rate_limited = True
+                            continue
+                        if response.status_code in (400, 404):
+                            continue
+                        data_probe = response.json()
+                        if data_probe.get('results'):
+                            selected_field = field
+                            selected_code = code_candidate
+                            selected_date_field = date_field
+                            break
+                    except Exception:
+                        continue
+                if selected_field:
                     break
-            except Exception:
-                continue
-        if selected_field:
-            break
+            if selected_field:
+                break
 
     combined_fields = search_fields
     if not selected_field:
+        for date_field in date_fields:
+            for code_candidate in candidates:
+                search_value = _format_openfda_search_value(code_candidate)
+                combined_query = _build_product_code_query(combined_fields, search_value)
+                search = f'{date_field}:[{start_openfda} TO {end_openfda}] AND {combined_query}'
+                params = {'search': search, 'limit': 1, 'sort': sort, 'fields': probe_fields}
+                if api_key:
+                    params['api_key'] = api_key
+                try:
+                    response = _openfda_get(base_url, params=params, allow_not_found=True, allow_bad_request=True)
+                    if response.status_code == 429:
+                        rate_limited = True
+                        continue
+                    if response.status_code in (400, 404):
+                        continue
+                    data_probe = response.json()
+                    if data_probe.get('results'):
+                        selected_field = combined_fields
+                        selected_code = code_candidate
+                        selected_date_field = date_field
+                        break
+                except Exception:
+                    continue
+            if selected_field:
+                break
+
+    if not selected_field and rate_limited:
+        return jsonify({'error': 'openFDA rate limit reached. Please try again in a few minutes or set OPENFDA_API_KEY.'}), 429
+
+    date_filtered_search = True
+    if not selected_field:
         for code_candidate in candidates:
             search_value = _format_openfda_search_value(code_candidate)
-            combined_query = _build_product_code_query(combined_fields, search_value)
-            search = f'date_received:[{start_openfda} TO {end_openfda}] AND {combined_query}'
-            params = {'search': search, 'limit': 1, 'sort': sort}
-            if api_key:
-                params['api_key'] = api_key
-            try:
-                response = _openfda_get(base_url, params=params, allow_not_found=True)
-                if response.status_code == 404:
+            for field in search_fields:
+                search = f'{field}:{search_value}'
+                params = {'search': search, 'limit': 1, 'sort': sort, 'fields': probe_fields}
+                if api_key:
+                    params['api_key'] = api_key
+                try:
+                    response = _openfda_get(base_url, params=params, allow_not_found=True, allow_bad_request=True)
+                    if response.status_code in (400, 404):
+                        continue
+                    data_probe = response.json()
+                    if data_probe.get('results'):
+                        selected_field = field
+                        selected_code = code_candidate
+                        date_filtered_search = False
+                        break
+                except Exception:
                     continue
-                data_probe = response.json()
-                if data_probe.get('results'):
-                    selected_field = combined_fields
-                    selected_code = code_candidate
-                    break
+            if selected_field:
+                break
+
+    # Last-resort probe without fields/sort (some openFDA queries are picky)
+    if not selected_field:
+        for code_candidate in candidates:
+            search_value = _format_openfda_search_value(code_candidate)
+            search = f'device.device_report_product_code:{search_value}'
+            try:
+                response = _openfda_get(base_url, params={'search': search, 'limit': 1}, allow_not_found=True, allow_bad_request=True)
+                if response.status_code == 200:
+                    data_probe = response.json()
+                    if data_probe.get('results'):
+                        selected_field = 'device.device_report_product_code'
+                        selected_code = code_candidate
+                        date_filtered_search = False
+                        break
             except Exception:
                 continue
 
@@ -1194,15 +1386,29 @@ def api_maude_export():
 
     if not selected_code:
         selected_code = normalized_code
+    if not selected_date_field:
+        selected_date_field = 'date_received'
+    sort_field = selected_date_field
+    sort = f'{sort_field}:asc'
     search_value = _format_openfda_search_value(selected_code)
     product_query = _build_product_code_query(selected_field, search_value)
-    search = f'date_received:[{start_openfda} TO {end_openfda}] AND {product_query}'
-    params = {'search': search, 'limit': limit, 'sort': sort}
+    if date_filtered_search:
+        search = f'{selected_date_field}:[{start_openfda} TO {end_openfda}] AND {product_query}'
+    else:
+        search = product_query
+    params = {'search': search, 'limit': limit, 'sort': sort, 'fields': export_fields}
     if api_key:
         params['api_key'] = api_key
 
     try:
-        first_response = _openfda_get(base_url, params=params, allow_not_found=True)
+        first_response = _openfda_get(base_url, params=params, allow_not_found=True, allow_bad_request=True)
+        if first_response.status_code == 400:
+            fallback_params = {'search': search, 'limit': limit}
+            if api_key:
+                fallback_params['api_key'] = api_key
+            first_response = _openfda_get(base_url, params=fallback_params, allow_not_found=True, allow_bad_request=True)
+        if first_response.status_code == 400:
+            return jsonify({'error': 'openFDA rejected the query. Please verify the product code and date range and try again.'}), 400
         if first_response.status_code == 404:
             return jsonify({'error': 'No matching records found for the provided product code and date range.'}), 404
         first_payload = first_response.json()
@@ -1210,6 +1416,11 @@ def api_maude_export():
         return jsonify({'error': f'openFDA request failed: {str(e)}'}), 502
 
     first_results = first_payload.get('results', [])
+    total_results = None
+    try:
+        total_results = first_payload.get('meta', {}).get('results', {}).get('total')
+    except Exception:
+        total_results = None
     if not first_results:
         return jsonify({'error': 'No matching records found for the provided product code and date range.'}), 404
 
@@ -1307,7 +1518,7 @@ def api_maude_export():
             'Event Text': event_description
         }
 
-    def generate_csv():
+    def generate_csv(progress_callback=None):
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=columns)
         writer.writeheader()
@@ -1318,17 +1529,40 @@ def api_maude_export():
         current_results = first_results
         current_next = next_url
         last_next = None
+        processed = 0
+        scanned = 0
+        last_progress_time = time.time()
+        buffered_rows = 0
+        flush_every = 200
 
         while True:
             for record in current_results:
-                if not _record_in_date_range(record, start_date, end_date):
+                scanned += 1
+                if not _record_in_date_range(record, start_date, end_date, selected_date_field):
+                    if progress_callback and scanned % 1000 == 0:
+                        progress_callback(processed, scanned)
                     continue
                 if not _record_has_product_code(record, selected_code):
+                    if progress_callback and scanned % 1000 == 0:
+                        progress_callback(processed, scanned)
                     continue
                 writer.writerow(build_row(record))
+                buffered_rows += 1
+                processed += 1
+                if buffered_rows >= flush_every:
+                    yield output.getvalue().encode('utf-8')
+                    output.seek(0)
+                    output.truncate(0)
+                    buffered_rows = 0
+                if progress_callback and (processed % 200 == 0 or (time.time() - last_progress_time) > 3):
+                    progress_callback(processed, scanned)
+                    last_progress_time = time.time()
+
+            if buffered_rows > 0:
                 yield output.getvalue().encode('utf-8')
                 output.seek(0)
                 output.truncate(0)
+                buffered_rows = 0
 
             if not current_next:
                 if len(current_results) == limit:
@@ -1339,7 +1573,8 @@ def api_maude_export():
                             'search': search,
                             'limit': limit,
                             'sort': sort,
-                            'search_after': last_key
+                            'search_after': last_key,
+                            'fields': export_fields
                         }
                         if api_key:
                             fallback_params['api_key'] = api_key
@@ -1369,6 +1604,34 @@ def api_maude_export():
 
     safe_code = re.sub(r'[^A-Za-z0-9_-]+', '', product_code.upper()) or 'CODE'
     filename = f"maude_{safe_code}_{date_from}_{date_to}.csv"
+
+    if async_requested:
+        if not date_filtered_search:
+            total_results = None
+        job_id = str(uuid.uuid4())
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"export_{job_id}.csv")
+        user_id = current_user.id
+        _set_export_status(job_id, status='queued', user_id=user_id, output_filename=filename, processed=0, scanned=0, total=total_results)
+
+        def run_export_job(job_user_id):
+            _set_export_status(job_id, status='running', user_id=job_user_id)
+            def progress_callback(count, scanned_count):
+                _set_export_status(job_id, processed=count, scanned=scanned_count, total=total_results, user_id=job_user_id)
+            try:
+                with open(output_path, 'wb') as f:
+                    for chunk in generate_csv(progress_callback=progress_callback):
+                        f.write(chunk)
+                _set_export_status(job_id, status='done', output_path=output_path, output_filename=filename, user_id=job_user_id)
+            except Exception as e:
+                _set_export_status(job_id, status='failed', error=str(e), user_id=job_user_id)
+
+        thread = threading.Thread(target=run_export_job, args=(user_id,), daemon=True)
+        thread.start()
+        return jsonify({
+            'job_id': job_id,
+            'status_url': url_for('maude_export_status', job_id=job_id),
+            'download_url': url_for('maude_export_download', job_id=job_id)
+        }), 202
 
     response = Response(stream_with_context(generate_csv()), mimetype='text/csv')
     response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'

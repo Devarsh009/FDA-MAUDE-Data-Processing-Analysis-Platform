@@ -637,6 +637,9 @@
                 <button class="analyze-btn show" id="bulkDownloadBtn" style="margin-top: 6px;">
                     <i class="fas fa-cloud-download-alt"></i> Download All Records
                 </button>
+                <div id="bulkProgress" style="display: none; margin-top: 12px; background: #e5e7eb; border-radius: 999px; overflow: hidden; height: 12px;">
+                    <div id="bulkProgressFill" style="height: 100%; width: 0%; background: linear-gradient(90deg, #60a5fa, #34d399); transition: width 0.4s ease;"></div>
+                </div>
                 <div id="bulkDownloadStatus" class="status" style="margin-top: 16px;"></div>
             </div>
         </div>
@@ -674,6 +677,9 @@
         const bulkFormat = document.getElementById('bulkFormat');
         const bulkDownloadBtn = document.getElementById('bulkDownloadBtn');
         const bulkDownloadStatus = document.getElementById('bulkDownloadStatus');
+        const bulkProgress = document.getElementById('bulkProgress');
+        const bulkProgressFill = document.getElementById('bulkProgressFill');
+        let bulkLastProcessed = 0;
 
         // Level label mappings
         const levelLabels = {
@@ -751,6 +757,11 @@
 
         function hideBulkStatus() {
             bulkDownloadStatus.className = 'status';
+        }
+
+        function updateBulkProgress(percent) {
+            bulkProgress.style.display = 'block';
+            bulkProgressFill.style.width = `${percent}%`;
         }
 
         async function refreshPreparedData(level) {
@@ -1005,6 +1016,8 @@
 
             bulkDownloadBtn.disabled = true;
             bulkDownloadBtn.innerHTML = '<span class="spinner"></span> Preparing download...';
+            bulkLastProcessed = 0;
+            updateBulkProgress(5);
             showBulkStatus('Fetching records from openFDA. This may take a while...', 'info');
 
             try {
@@ -1017,11 +1030,73 @@
                         product_code: productCode,
                         date_from: fromDate,
                         date_to: toDate,
-                        format: format
+                        format: format,
+                        async: true
                     })
                 });
 
-                if (!response.ok) {
+                if (response.status === 202) {
+                    const payload = await response.json();
+                    const statusUrl = payload.status_url;
+                    const downloadUrl = payload.download_url;
+                    const pollInterval = 4000;
+                    const maxAttempts = 300;
+                    let attempts = 0;
+
+                    const poll = async () => {
+                        attempts += 1;
+                        try {
+                            const statusResp = await fetch(statusUrl);
+                            const statusData = await statusResp.json();
+                            if (statusData.status === 'running') {
+                                if (statusData.total) {
+                                    const processed = statusData.processed || 0;
+                                    const percent = Math.min(99, Math.floor(processed / statusData.total * 100));
+                                    updateBulkProgress(percent);
+                                    showBulkStatus(`Fetching records... ${percent}% (${processed}/${statusData.total})`, 'info');
+                                } else {
+                                    const processed = statusData.processed || 0;
+                                    if (processed > bulkLastProcessed) {
+                                        bulkLastProcessed = processed;
+                                    }
+                                    const scanned = statusData.scanned || 0;
+                                    updateBulkProgress(Math.min(99, scanned > 0 ? 60 : 10));
+                                    showBulkStatus(`Fetching records... ${bulkLastProcessed} processed (${scanned} scanned)`, 'info');
+                                }
+                            }
+                            if (statusData.status === 'done') {
+                                const fileResp = await fetch(downloadUrl);
+                                const blob = await fileResp.blob();
+                                const url = window.URL.createObjectURL(blob);
+                                const link = document.createElement('a');
+                                link.href = url;
+                                link.download = `maude_${productCode}_${fromDate}_${toDate}.csv`;
+                                document.body.appendChild(link);
+                                link.click();
+                                link.remove();
+                                window.URL.revokeObjectURL(url);
+                                updateBulkProgress(100);
+                                showBulkStatus('✅ Download started. Check your downloads folder.', 'success');
+                                return;
+                            }
+                            if (statusData.status === 'failed') {
+                                updateBulkProgress(0);
+                                showBulkStatus(`❌ ${statusData.error || 'Download failed.'}`, 'error');
+                                return;
+                            }
+                            if (attempts < maxAttempts) {
+                                setTimeout(poll, pollInterval);
+                            } else {
+                                updateBulkProgress(0);
+                                showBulkStatus('❌ Download is taking too long. Please try again.', 'error');
+                            }
+                        } catch (error) {
+                            showBulkStatus(`❌ ${error.message}`, 'error');
+                        }
+                    };
+
+                    setTimeout(poll, pollInterval);
+                } else if (!response.ok) {
                     let errorMessage = 'Download failed.';
                     try {
                         const errorData = await response.json();
@@ -1032,25 +1107,6 @@
                     showBulkStatus(`❌ ${errorMessage}`, 'error');
                     return;
                 }
-
-                const blob = await response.blob();
-                const contentDisposition = response.headers.get('Content-Disposition') || '';
-                let filename = 'maude_export.csv';
-                const match = contentDisposition.match(/filename="?([^";]+)"?/i);
-                if (match && match[1]) {
-                    filename = match[1];
-                }
-
-                const url = window.URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = filename;
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                window.URL.revokeObjectURL(url);
-
-                showBulkStatus('✅ Download started. Check your downloads folder.', 'success');
             } catch (error) {
                 showBulkStatus(`❌ ${error.message}`, 'error');
             } finally {

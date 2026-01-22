@@ -531,14 +531,19 @@ class MAUDEProcessor:
         # Get unique manufacturers for batch processing
         unique_manufacturers = df[manufacturer_col].dropna().unique()
         print(f"Processing {len(unique_manufacturers)} unique manufacturer names for canonicalization...")
-        
-        # Normalize each unique manufacturer (includes M&A verification)
-        manufacturer_map = {}
-        for mfr in unique_manufacturers:
-            mfr_str = str(mfr).strip()
-            if mfr_str and mfr_str.lower() not in ['nan', '', 'none', 'null']:
-                normalized = self.manufacturer_normalizer.normalize(mfr_str)
-                manufacturer_map[mfr] = normalized
+
+        disable_web_verify = os.getenv('DISABLE_MANUFACTURER_WEB_VERIFY', '1') == '1'
+        if disable_web_verify:
+            print("Manufacturer web verification disabled. Using deterministic-only normalization.")
+            manufacturer_map = self.manufacturer_normalizer.normalize_batch(
+                list(unique_manufacturers),
+                deterministic_only=True
+            )
+        else:
+            manufacturer_map = self.manufacturer_normalizer.normalize_batch(
+                list(unique_manufacturers),
+                deterministic_only=False
+            )
         
         # Apply mapping deterministically
         df[manufacturer_col] = df[manufacturer_col].map(manufacturer_map).fillna(df[manufacturer_col])

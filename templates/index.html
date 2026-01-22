@@ -911,6 +911,12 @@
             progressBar.classList.add('show');
             progressFill.style.width = percent + '%';
         }
+
+        let asyncProgress = 5;
+        function updateAsyncProgress() {
+            asyncProgress = Math.min(90, asyncProgress + 5);
+            updateProgress(asyncProgress);
+        }
         
         function showStats(stats) {
             if (stats) {
@@ -968,6 +974,8 @@
                     const downloadUrl = payload.download_url;
 
                     showStatus('Processing started. This may take several minutes...', 'info');
+                    asyncProgress = 10;
+                    updateProgress(asyncProgress);
 
                     const pollInterval = 3000;
                     const maxAttempts = 200;
@@ -1003,6 +1011,9 @@
                                 updateProgress(0);
                                 progressBar.classList.remove('show');
                                 return;
+                            }
+                            if (statusData.status === 'running' || statusData.status === 'queued') {
+                                updateAsyncProgress();
                             }
                             if (attempts < maxAttempts) {
                                 setTimeout(poll, pollInterval);
