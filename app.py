@@ -25,7 +25,8 @@ from backend.imdrf_insights import (
     analyze_imdrf_insights,
     get_top_manufacturers_for_prefix,
     LEVEL_CONFIG,
-    get_imdrf_code_counts_all_levels
+    get_imdrf_code_counts_all_levels,
+    get_imdrf_code_counts_all_levels_with_descriptions
 )
 from backend.imdrf_annex_validator import get_annex_status
 from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
@@ -272,17 +273,29 @@ def process_download(job_id):
 def api_imdrf_counts_download_xlsx():
     """Upload a cleaned file and download IMDRF code counts for all levels as XLSX."""
     if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+        return jsonify({'error': 'No cleaned file uploaded'}), 400
+
+    if 'annex' not in request.files:
+        return jsonify({'error': 'IMDRF Annex file is required'}), 400
 
     file = request.files['file']
+    annex_file = request.files['annex']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
+
+    if annex_file.filename == '':
+        return jsonify({'error': 'No Annex file selected'}), 400
 
     file_ext = os.path.splitext(file.filename.lower())[1]
     if file_ext not in {'.csv', '.xlsx', '.xls'}:
         return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
 
+    annex_ext = os.path.splitext(annex_file.filename.lower())[1]
+    if annex_ext not in {'.xlsx', '.xls'}:
+        return jsonify({'error': 'Invalid Annex file type. Please upload XLS or XLSX file.'}), 400
+
     temp_path = None
+    annex_path = None
 
     try:
         filename = secure_filename(file.filename)
@@ -290,7 +303,11 @@ def api_imdrf_counts_download_xlsx():
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"counts_{file_id}_{filename}")
         file.save(temp_path)
 
-        counts_by_level = get_imdrf_code_counts_all_levels(temp_path)
+        annex_filename = secure_filename(annex_file.filename)
+        annex_path = os.path.join(app.config['UPLOAD_FOLDER'], f"annex_{file_id}_{annex_filename}")
+        annex_file.save(annex_path)
+
+        counts_by_level = get_imdrf_code_counts_all_levels_with_descriptions(temp_path, annex_path)
 
         from openpyxl import Workbook
         from openpyxl.styles import Font
@@ -303,12 +320,18 @@ def api_imdrf_counts_download_xlsx():
 
         for level in [1, 2, 3]:
             level_label = f"LEVEL-{level} Code"
-            ws.append([level_label, ""])
+            ws.append([level_label, "", ""])
             ws.cell(row=ws.max_row, column=1).font = bold_font
+
+            ws.append(["IMDRF Code", "Description", "Count"])
+            ws.cell(row=ws.max_row, column=1).font = bold_font
+            ws.cell(row=ws.max_row, column=2).font = bold_font
+            ws.cell(row=ws.max_row, column=3).font = bold_font
 
             level_counts = counts_by_level.get(level, {})
             for code in sorted(level_counts.keys()):
-                ws.append([code, level_counts.get(code, 0)])
+                row_data = level_counts.get(code, {})
+                ws.append([code, row_data.get('description', ''), row_data.get('count', 0)])
 
             ws.append(["", ""])
 
@@ -331,6 +354,11 @@ def api_imdrf_counts_download_xlsx():
                 os.remove(temp_path)
             except Exception:
                 pass
+        if annex_path and os.path.exists(annex_path):
+            try:
+                os.remove(annex_path)
+            except Exception:
+                pass
 
 
 @app.route('/api/imdrf-counts/download-csv', methods=['POST'])
@@ -338,21 +366,33 @@ def api_imdrf_counts_download_xlsx():
 def api_imdrf_counts_download_csv():
     """Upload a cleaned file and download IMDRF code counts as CSV (two columns)."""
     if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+        return jsonify({'error': 'No cleaned file uploaded'}), 400
+
+    if 'annex' not in request.files:
+        return jsonify({'error': 'IMDRF Annex file is required'}), 400
 
     file = request.files['file']
+    annex_file = request.files['annex']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
+
+    if annex_file.filename == '':
+        return jsonify({'error': 'No Annex file selected'}), 400
 
     file_ext = os.path.splitext(file.filename.lower())[1]
     if file_ext not in {'.csv', '.xlsx', '.xls'}:
         return jsonify({'error': 'Invalid file type. Please upload CSV, XLS, or XLSX file.'}), 400
+
+    annex_ext = os.path.splitext(annex_file.filename.lower())[1]
+    if annex_ext not in {'.xlsx', '.xls'}:
+        return jsonify({'error': 'Invalid Annex file type. Please upload XLS or XLSX file.'}), 400
 
     level = request.form.get('level', 'all')
     if level not in {'all', '1', '2', '3'}:
         return jsonify({'error': 'Invalid level selection.'}), 400
 
     temp_path = None
+    annex_path = None
 
     try:
         filename = secure_filename(file.filename)
@@ -360,27 +400,31 @@ def api_imdrf_counts_download_csv():
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"counts_{file_id}_{filename}")
         file.save(temp_path)
 
-        counts_by_level = get_imdrf_code_counts_all_levels(temp_path)
+        annex_filename = secure_filename(annex_file.filename)
+        annex_path = os.path.join(app.config['UPLOAD_FOLDER'], f"annex_{file_id}_{annex_filename}")
+        annex_file.save(annex_path)
+
+        counts_by_level = get_imdrf_code_counts_all_levels_with_descriptions(temp_path, annex_path)
 
         rows = []
         if level == 'all':
             for level_num in [1, 2, 3]:
                 level_counts = counts_by_level.get(level_num, {})
                 for code, count in level_counts.items():
-                    rows.append((code, count))
+                    rows.append((code, count.get('description', ''), count.get('count', 0)))
         else:
             level_num = int(level)
             level_counts = counts_by_level.get(level_num, {})
             for code, count in level_counts.items():
-                rows.append((code, count))
+                rows.append((code, count.get('description', ''), count.get('count', 0)))
 
         rows.sort(key=lambda x: x[0])
 
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['IMDRF Code', 'Count'])
-        for code, count in rows:
-            writer.writerow([code, count])
+        writer.writerow(['IMDRF Code', 'Description', 'Count'])
+        for code, description, count in rows:
+            writer.writerow([code, description, count])
 
         csv_bytes = io.BytesIO(output.getvalue().encode('utf-8'))
         csv_bytes.seek(0)
@@ -401,6 +445,11 @@ def api_imdrf_counts_download_csv():
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
+            except Exception:
+                pass
+        if annex_path and os.path.exists(annex_path):
+            try:
+                os.remove(annex_path)
             except Exception:
                 pass
 

@@ -102,6 +102,9 @@ class MAUDEProcessor:
         else:
             print("WARNING: IMDRF lookup maps are empty. IMDRF codes will be blank.")
         df = self._map_imdrf_codes(df)
+
+        # Phase 6.5: Patient Problem normalization (explode semicolon-separated values into rows)
+        df = self._explode_patient_problem_rows(df)
         
         # Phase 7: Final Validation
         validation_results = self._validate_output(df, original_cols)
@@ -431,6 +434,72 @@ class MAUDEProcessor:
             return candidates[0][1]
         
         return None
+
+    def _find_patient_problem_column(self, df: pd.DataFrame) -> Optional[str]:
+        """
+        Identify the Patient Problem column (NO RENAMING).
+        Returns the exact existing column name or None.
+        """
+        def normalize_header(header: str) -> str:
+            return ' '.join(str(header).strip().lower().split())
+
+        normalized_headers = {normalize_header(h): h for h in df.columns}
+
+        exact_matches = {
+            "patient problem",
+            "patient problems",
+            "patient problem text",
+            "patient_problem",
+            "patient_problems",
+            "patient_problem_text"
+        }
+        for exact in exact_matches:
+            if exact in normalized_headers:
+                return normalized_headers[exact]
+
+        candidates = []
+        for norm, orig in normalized_headers.items():
+            if "patient" in norm and "problem" in norm:
+                candidates.append((norm, orig))
+
+        if candidates:
+            candidates.sort(key=lambda x: len(x[0]))
+            return candidates[0][1]
+
+        return None
+
+    def _explode_patient_problem_rows(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        If Patient Problem column exists, explode semicolon-separated values into
+        multiple rows while keeping all other columns consistent.
+        """
+        patient_problem_col = self._find_patient_problem_column(df)
+
+        if not patient_problem_col:
+            return df
+
+        print(f"\n=== PATIENT PROBLEM NORMALIZATION PHASE ===")
+        print(f"Found Patient Problem column: '{patient_problem_col}'")
+
+        expanded_rows = []
+
+        for _, row in df.iterrows():
+            raw = row.get(patient_problem_col, "")
+            raw_str = "" if raw is None else str(raw)
+            parts = [p.strip() for p in raw_str.split(";") if p.strip()]
+
+            if not parts:
+                new_row = row.to_dict()
+                new_row[patient_problem_col] = raw_str.strip()
+                expanded_rows.append(new_row)
+                continue
+
+            for part in parts:
+                new_row = row.to_dict()
+                new_row[patient_problem_col] = part
+                expanded_rows.append(new_row)
+
+        return pd.DataFrame(expanded_rows, columns=df.columns)
     
     def _clean_manufacturer(self, val: str) -> str:
         """
