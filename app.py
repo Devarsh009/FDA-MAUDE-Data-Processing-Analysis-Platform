@@ -26,7 +26,8 @@ from backend.imdrf_insights import (
     get_top_manufacturers_for_prefix,
     LEVEL_CONFIG,
     get_imdrf_code_counts_all_levels,
-    get_imdrf_code_counts_all_levels_with_descriptions
+    get_imdrf_code_counts_all_levels_with_descriptions,
+    get_patient_problem_counts
 )
 from backend.imdrf_annex_validator import get_annex_status
 from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
@@ -308,6 +309,7 @@ def api_imdrf_counts_download_xlsx():
         annex_file.save(annex_path)
 
         counts_by_level = get_imdrf_code_counts_all_levels_with_descriptions(temp_path, annex_path)
+        patient_problem_counts = get_patient_problem_counts(temp_path)
 
         from openpyxl import Workbook
         from openpyxl.styles import Font
@@ -334,6 +336,13 @@ def api_imdrf_counts_download_xlsx():
                 ws.append([code, row_data.get('description', ''), row_data.get('count', 0)])
 
             ws.append(["", ""])
+
+        ws.append(["Patient Problem", "Count", ""])
+        ws.cell(row=ws.max_row, column=1).font = bold_font
+        ws.cell(row=ws.max_row, column=2).font = bold_font
+
+        for problem in sorted(patient_problem_counts.keys()):
+            ws.append([problem, patient_problem_counts.get(problem, 0), ""])
 
         output = io.BytesIO()
         wb.save(output)

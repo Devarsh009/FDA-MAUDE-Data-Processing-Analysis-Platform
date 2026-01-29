@@ -685,6 +685,61 @@ def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_fil
     return merged
 
 
+def get_patient_problem_counts(file_path: str) -> Dict[str, int]:
+    """
+    Get patient problem counts from a cleaned file.
+
+    Returns:
+        dict: {patient_problem: count}
+    """
+    file_ext = os.path.splitext(file_path)[1].lower()
+
+    if file_ext in ['.xlsx', '.xls']:
+        df = pd.read_excel(file_path, dtype=str)
+    elif file_ext == '.csv':
+        df = pd.read_csv(file_path, dtype=str, encoding="utf-8", on_bad_lines="skip")
+    else:
+        raise ValueError(f"Unsupported file format: {file_ext}. Please upload CSV, XLS, or XLSX file.")
+
+    for col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].replace({"nan": "", "NaN": "", "None": ""})
+
+    patient_col = None
+    for col in df.columns:
+        col_norm = str(col).strip().lower().replace('_', ' ')
+        if col_norm in {"patient problem", "patient problems", "patient problem text"}:
+            patient_col = col
+            break
+    if patient_col is None:
+        for col in df.columns:
+            col_norm = str(col).strip().lower().replace('_', ' ')
+            if "patient" in col_norm and "problem" in col_norm:
+                patient_col = col
+                break
+
+    if patient_col is None:
+        available_cols = ', '.join(df.columns.tolist())
+        raise ValueError(
+            f"No Patient Problem column found. Available columns: {available_cols}"
+        )
+
+    counts: Dict[str, int] = {}
+    for value in df[patient_col].tolist():
+        if value is None:
+            continue
+        raw = str(value).strip()
+        if not raw or raw.lower() == "nan":
+            continue
+        parts = [p.strip() for p in raw.split(';') if p.strip()]
+        if not parts:
+            continue
+        for part in parts:
+            counts[part] = counts.get(part, 0) + 1
+
+    return counts
+
+
 def get_top_manufacturers_for_prefix(df_exploded, prefix, mfr_col, top_n=5):
     """
     Get top N manufacturers by volume for a specific IMDRF prefix.
