@@ -76,6 +76,17 @@ login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 login_manager.login_message_category = 'info'
 
+
+@login_manager.unauthorized_handler
+def _handle_unauthorized():
+    """Return JSON for API routes, otherwise redirect to login."""
+    try:
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Authentication required'}), 401
+    except Exception:
+        pass
+    return redirect(url_for('login', next=request.path))
+
 # Initialize Flask-Mail
 mail = Mail(app)
 

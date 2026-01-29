@@ -625,9 +625,19 @@
                     body: formData
                 });
 
+                const contentType = response.headers.get('Content-Type') || '';
+
                 if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.error || 'Download failed');
+                    if (contentType.includes('application/json')) {
+                        const err = await response.json();
+                        throw new Error(err.error || 'Download failed');
+                    }
+                    const errText = await response.text();
+                    throw new Error(errText || 'Download failed');
+                }
+
+                if (contentType.includes('text/html')) {
+                    throw new Error('Session expired or unauthorized. Please log in again.');
                 }
 
                 const blob = await response.blob();
