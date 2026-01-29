@@ -27,7 +27,8 @@ from backend.imdrf_insights import (
     LEVEL_CONFIG,
     get_imdrf_code_counts_all_levels,
     get_imdrf_code_counts_all_levels_with_descriptions,
-    get_patient_problem_counts
+    get_patient_problem_counts,
+    _load_cleaned_dataframe
 )
 from backend.imdrf_annex_validator import get_annex_status
 from backend.txt_to_csv_converter import TxtToCsvConverter, get_txt_preview
@@ -319,8 +320,9 @@ def api_imdrf_counts_download_xlsx():
         annex_path = os.path.join(app.config['UPLOAD_FOLDER'], f"annex_{file_id}_{annex_filename}")
         annex_file.save(annex_path)
 
-        counts_by_level = get_imdrf_code_counts_all_levels_with_descriptions(temp_path, annex_path)
-        patient_problem_counts = get_patient_problem_counts(temp_path)
+        cleaned_df = _load_cleaned_dataframe(temp_path)
+        counts_by_level = get_imdrf_code_counts_all_levels_with_descriptions(temp_path, annex_path, df=cleaned_df)
+        patient_problem_counts = get_patient_problem_counts(temp_path, df=cleaned_df)
 
         from openpyxl import Workbook
         from openpyxl.styles import Font

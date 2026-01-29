@@ -551,16 +551,8 @@ def prepare_data_for_insights(file_path, level=1):
     }
 
 
-def get_imdrf_code_counts_all_levels(file_path):
-    """
-    Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file.
-    This does NOT require a date column.
-
-    Returns:
-        dict: {1: {code: count}, 2: {code: count}, 3: {code: count}}
-    """
-    import os
-
+def _load_cleaned_dataframe(file_path: str) -> pd.DataFrame:
+    """Load a cleaned MAUDE file into a DataFrame with string values."""
     file_ext = os.path.splitext(file_path)[1].lower()
 
     if file_ext in ['.xlsx', '.xls']:
@@ -570,10 +562,25 @@ def get_imdrf_code_counts_all_levels(file_path):
     else:
         raise ValueError(f"Unsupported file format: {file_ext}. Please upload CSV, XLS, or XLSX file.")
 
-    # Clean up string columns
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({"nan": "", "NaN": "", "None": ""})
+
+    return df
+
+
+def get_imdrf_code_counts_all_levels(file_path, df: pd.DataFrame = None):
+    """
+    Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file.
+    This does NOT require a date column.
+
+    Returns:
+        dict: {1: {code: count}, 2: {code: count}, 3: {code: count}}
+    """
+    import os
+
+    if df is None:
+        df = _load_cleaned_dataframe(file_path)
 
     imdrf_col = find_imdrf_column(df)
     if imdrf_col is None:
@@ -661,7 +668,7 @@ def load_imdrf_code_descriptions(annex_file_path: str) -> Dict[int, Dict[str, st
     return level_descriptions
 
 
-def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_file_path: str):
+def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_file_path: str, df: pd.DataFrame = None):
     """
     Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file,
     and attach the Annex description for each code.
@@ -669,7 +676,7 @@ def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_fil
     Returns:
         dict: {level: {code: {"count": int, "description": str}}}
     """
-    counts_by_level = get_imdrf_code_counts_all_levels(file_path)
+    counts_by_level = get_imdrf_code_counts_all_levels(file_path, df=df)
     descriptions_by_level = load_imdrf_code_descriptions(annex_file_path)
 
     merged = {}
@@ -685,25 +692,15 @@ def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_fil
     return merged
 
 
-def get_patient_problem_counts(file_path: str) -> Dict[str, int]:
+def get_patient_problem_counts(file_path: str, df: pd.DataFrame = None) -> Dict[str, int]:
     """
     Get patient problem counts from a cleaned file.
 
     Returns:
         dict: {patient_problem: count}
     """
-    file_ext = os.path.splitext(file_path)[1].lower()
-
-    if file_ext in ['.xlsx', '.xls']:
-        df = pd.read_excel(file_path, dtype=str)
-    elif file_ext == '.csv':
-        df = pd.read_csv(file_path, dtype=str, encoding="utf-8", on_bad_lines="skip")
-    else:
-        raise ValueError(f"Unsupported file format: {file_ext}. Please upload CSV, XLS, or XLSX file.")
-
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-        df[col] = df[col].replace({"nan": "", "NaN": "", "None": ""})
+    if df is None:
+        df = _load_cleaned_dataframe(file_path)
 
     patient_col = None
     for col in df.columns:
