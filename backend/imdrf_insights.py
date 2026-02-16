@@ -12,7 +12,9 @@ Supports three analysis levels:
 This is a read-only analysis module that does not modify the original data.
 """
 
+import os
 import re
+from typing import Dict
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -549,16 +551,8 @@ def prepare_data_for_insights(file_path, level=1):
     }
 
 
-def get_imdrf_code_counts_all_levels(file_path):
-    """
-    Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file.
-    This does NOT require a date column.
-
-    Returns:
-        dict: {1: {code: count}, 2: {code: count}, 3: {code: count}}
-    """
-    import os
-
+def _load_cleaned_dataframe(file_path: str) -> pd.DataFrame:
+    """Load a cleaned MAUDE file into a DataFrame with string values."""
     file_ext = os.path.splitext(file_path)[1].lower()
 
     if file_ext in ['.xlsx', '.xls']:
@@ -568,10 +562,25 @@ def get_imdrf_code_counts_all_levels(file_path):
     else:
         raise ValueError(f"Unsupported file format: {file_ext}. Please upload CSV, XLS, or XLSX file.")
 
-    # Clean up string columns
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({"nan": "", "NaN": "", "None": ""})
+
+    return df
+
+
+def get_imdrf_code_counts_all_levels(file_path, df: pd.DataFrame = None):
+    """
+    Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file.
+    This does NOT require a date column.
+
+    Returns:
+        dict: {1: {code: count}, 2: {code: count}, 3: {code: count}}
+    """
+    import os
+
+    if df is None:
+        df = _load_cleaned_dataframe(file_path)
 
     imdrf_col = find_imdrf_column(df)
     if imdrf_col is None:
@@ -596,6 +605,136 @@ def get_imdrf_code_counts_all_levels(file_path):
         2: count_for_level(2),
         3: count_for_level(3)
     }
+
+
+def load_imdrf_code_descriptions(annex_file_path: str) -> Dict[int, Dict[str, str]]:
+    """
+    Load IMDRF code descriptions from the Annexes A-G consolidated file.
+
+    Returns:
+        dict: {1: {code: description}, 2: {code: description}, 3: {code: description}}
+    """
+    import pandas as pd
+
+    if not annex_file_path or not os.path.exists(annex_file_path):
+        raise ValueError("Annex file not found. Please upload the Annexes A-G consolidated file.")
+
+    xl = pd.ExcelFile(annex_file_path)
+    level_descriptions = {1: {}, 2: {}, 3: {}}
+
+    required_cols = {"Level 1 Term", "Level 2 Term", "Level 3 Term", "Code"}
+
+    for sheet in xl.sheet_names:
+        df_raw = xl.parse(sheet_name=sheet, header=None, dtype=str)
+
+        # Find header row
+        header_row_idx = None
+        for i in range(min(50, len(df_raw))):
+            row_vals = [str(v).strip() for v in df_raw.iloc[i].tolist()]
+            if "Level 1 Term" in row_vals:
+                header_row_idx = i
+                break
+        if header_row_idx is None:
+            continue
+
+        df = xl.parse(sheet_name=sheet, header=header_row_idx, dtype=str)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        if not required_cols.issubset(set(df.columns)):
+            continue
+
+        # Forward fill
+        df["Level 1 Term"] = df["Level 1 Term"].ffill()
+        df["Level 2 Term"] = df["Level 2 Term"].ffill()
+
+        for _, row in df.iterrows():
+            code = "" if row.get("Code") is None else str(row.get("Code")).strip()
+            if not code or code.lower() == "nan":
+                continue
+
+            if len(code) == 3:
+                desc = str(row.get("Level 1 Term") or "").strip()
+                if desc:
+                    level_descriptions[1].setdefault(code, desc)
+            elif len(code) == 5:
+                desc = str(row.get("Level 2 Term") or "").strip()
+                if desc:
+                    level_descriptions[2].setdefault(code, desc)
+            elif len(code) == 7:
+                desc = str(row.get("Level 3 Term") or "").strip()
+                if desc:
+                    level_descriptions[3].setdefault(code, desc)
+
+    return level_descriptions
+
+
+def get_imdrf_code_counts_all_levels_with_descriptions(file_path: str, annex_file_path: str, df: pd.DataFrame = None):
+    """
+    Get IMDRF code counts for Level-1, Level-2, and Level-3 from a cleaned file,
+    and attach the Annex description for each code.
+
+    Returns:
+        dict: {level: {code: {"count": int, "description": str}}}
+    """
+    counts_by_level = get_imdrf_code_counts_all_levels(file_path, df=df)
+    descriptions_by_level = load_imdrf_code_descriptions(annex_file_path)
+
+    merged = {}
+    for level, counts in counts_by_level.items():
+        level_desc = descriptions_by_level.get(level, {})
+        merged[level] = {}
+        for code, count in counts.items():
+            merged[level][code] = {
+                "count": count,
+                "description": level_desc.get(code, "")
+            }
+
+    return merged
+
+
+def get_patient_problem_counts(file_path: str, df: pd.DataFrame = None) -> Dict[str, int]:
+    """
+    Get patient problem counts from a cleaned file.
+
+    Returns:
+        dict: {patient_problem: count}
+    """
+    if df is None:
+        df = _load_cleaned_dataframe(file_path)
+
+    patient_col = None
+    for col in df.columns:
+        col_norm = str(col).strip().lower().replace('_', ' ')
+        if col_norm in {"patient problem", "patient problems", "patient problem text"}:
+            patient_col = col
+            break
+    if patient_col is None:
+        for col in df.columns:
+            col_norm = str(col).strip().lower().replace('_', ' ')
+            if "patient" in col_norm and "problem" in col_norm:
+                patient_col = col
+                break
+
+    if patient_col is None:
+        available_cols = ', '.join(df.columns.tolist())
+        raise ValueError(
+            f"No Patient Problem column found. Available columns: {available_cols}"
+        )
+
+    counts: Dict[str, int] = {}
+    for value in df[patient_col].tolist():
+        if value is None:
+            continue
+        raw = str(value).strip()
+        if not raw or raw.lower() == "nan":
+            continue
+        parts = [p.strip() for p in raw.split(';') if p.strip()]
+        if not parts:
+            continue
+        for part in parts:
+            counts[part] = counts.get(part, 0) + 1
+
+    return counts
 
 
 def get_top_manufacturers_for_prefix(df_exploded, prefix, mfr_col, top_n=5):
