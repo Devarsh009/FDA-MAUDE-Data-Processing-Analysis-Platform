@@ -559,6 +559,19 @@
                 </div>
             </div>
 
+                <div class="top-codes-section" id="topCodesSection" style="display: none; margin-top: 20px;">
+                    <h3 class="section-title">
+                        <i class="fas fa-ranking-star"></i>
+                        Top 5 Frequent Codes (Auto)
+                    </h3>
+                    <button class="analyze-btn show" id="topCodesBtn" style="margin-bottom: 14px;">
+                        <i class="fas fa-bolt"></i> Generate Top 5 Chart
+                    </button>
+                    <div class="chart-container">
+                        <div id="topCodesChart"></div>
+                    </div>
+                </div>
+
             <button class="analyze-btn" id="analyzeBtn">
                 <i class="fas fa-chart-bar"></i> Analyze Trends
             </button>
@@ -680,6 +693,9 @@
         const bulkProgress = document.getElementById('bulkProgress');
         const bulkProgressFill = document.getElementById('bulkProgressFill');
         let bulkLastProcessed = 0;
+        const topCodesSection = document.getElementById('topCodesSection');
+        const topCodesBtn = document.getElementById('topCodesBtn');
+        const topCodesChart = document.getElementById('topCodesChart');
 
         // Level label mappings
         const levelLabels = {
@@ -810,6 +826,7 @@
                     });
 
                     controlsSection.classList.add('show');
+                    topCodesSection.style.display = 'block';
                     showStatus(`✅ Updated to ${data.level_label || 'Level-' + level}: ${data.rows_with_dates} rows with valid dates, ${data.all_prefixes.length} codes found`, 'success');
                 } else {
                     showStatus(`❌ Error: ${data.error}`, 'error');
@@ -865,6 +882,7 @@
                     });
 
                     controlsSection.classList.add('show');
+                    topCodesSection.style.display = 'block';
                     showStatus(`✅ File processed at ${data.level_label || 'Level-' + currentLevel}: ${data.rows_with_dates} rows with valid dates, ${data.all_prefixes.length} codes found`, 'success');
                 } else {
                     showStatus(`❌ Error: ${data.error}`, 'error');
@@ -882,6 +900,7 @@
             fileUploadArea.style.display = 'block';
             downloadCountsTop.style.display = 'none';
             controlsSection.classList.remove('show');
+            topCodesSection.style.display = 'none';
             manufacturerSelectGroup.style.display = 'none';
             analyzeBtn.classList.remove('show');
             resultsSection.classList.remove('show');
@@ -896,6 +915,43 @@
             }
             const url = `/api/imdrf-insights/download-code-counts-xlsx?file_id=${preparedData.file_id}`;
             window.location.href = url;
+        });
+
+        topCodesBtn.addEventListener('click', () => {
+            if (!preparedData) {
+                showStatus('❌ Please upload a file first', 'error');
+                return;
+            }
+
+            const prefixCounts = preparedData.prefix_counts || {};
+            const topCodes = Object.entries(prefixCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5);
+
+            if (topCodes.length === 0) {
+                showStatus('❌ No codes available for the selected level', 'error');
+                return;
+            }
+
+            const codes = topCodes.map(item => item[0]);
+            const counts = topCodes.map(item => item[1]);
+
+            const trace = {
+                x: codes,
+                y: counts,
+                type: 'bar',
+                marker: {color: 'rgba(37, 99, 235, 0.8)'}
+            };
+
+            const levelLabel = preparedData.level_label || `Level-${currentLevel}`;
+            const layout = {
+                title: `Top 5 IMDRF Codes (${levelLabel})`,
+                xaxis: {title: 'IMDRF Code'},
+                yaxis: {title: 'Count'},
+                height: 400
+            };
+
+            Plotly.newPlot('topCodesChart', [trace], layout, {responsive: true});
         });
 
         prefixSelect.addEventListener('change', async () => {

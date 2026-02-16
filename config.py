@@ -22,7 +22,6 @@ COLUMNS_TO_DELETE = [
     "PMN Number",
     "Web Address",
     "Product Code",
-    "Brand Name",
     "Exemption Number",
     "Number of Events"
 ]
