@@ -80,11 +80,6 @@ Notes:
 - If you prefer a different filename for the dashboard, rename `streamlit_app.py` and run with `streamlit run <filename>`.
 
 
-
-## 📝 License
-
-[Add your license here]
-
 ## 👤 Author
 
 Devarsh Radadia
